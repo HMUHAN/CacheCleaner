@@ -1,0 +1,73 @@
+name: build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compile
+        shell: pwsh
+        run: |
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          & $csc /nologo /target:winexe /codepage:65001 /optimize+ `
+            /win32icon:assets/QQCacheTray.ico /win32manifest:app.manifest `
+            /out:QQCacheTray.exe `
+            /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll `
+            src/QQCacheTray.cs
+          if ($LASTEXITCODE -ne 0) { throw "csc failed: $LASTEXITCODE" }
+
+      - name: Version and hash
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -match '^v(.+)$') { $ver = $Matches[1] } else { $ver = "0.0.0" }
+          $sha = (Get-FileHash QQCacheTray.exe -Algorithm SHA256).Hash.ToLower()
+          "VERSION=$ver" >> $env:GITHUB_ENV
+          "SHA256=$sha"  >> $env:GITHUB_ENV
+          Write-Host "version=$ver sha256=$sha"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: QQCacheTray.exe
+          generate_release_notes: true
+          body: |
+            下载 `QQCacheTray.exe` 覆盖旧文件即可。
+
+            - 程序需要管理员权限（会弹 UAC）
+            - `data\` 下的配置和日志不会被覆盖
+
+      - name: Update latest.json
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $repo = "${{ github.repository }}"
+          $tag  = "${{ github.ref_name }}"
+          $json = [ordered]@{
+            version = $env:VERSION
+            url     = "https://github.com/$repo/releases/download/$tag/QQCacheTray.exe"
+            sha256  = $env:SHA256
+            notes   = "见 Release 页面"
+          } | ConvertTo-Json
+
+          Set-Content -Path latest.json -Value $json -Encoding UTF8
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add latest.json
+          git commit -m "chore: update latest.json for $tag"
+          git push origin HEAD:main

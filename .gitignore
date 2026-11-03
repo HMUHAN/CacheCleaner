@@ -1,0 +1,15 @@
+# 运行时生成，不进仓库
+data/
+*.log
+
+# 编译产物
+*.exe
+*.pdb
+*.obj
+
+# IDE
+.vs/
+*.user
+*.suo
+bin/
+obj/
