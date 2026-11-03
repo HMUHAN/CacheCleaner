@@ -185,8 +185,8 @@ namespace QQCacheTray
 
                             // 启动 5 秒后再提示，别和开机动作抢注意力
                             Thread.Sleep(5000);
-                            Toast.ShowToast("发现新版本 " + info.Version +
-                                            "：点托盘「设置」即可更新", 9000, true);
+                            Toast.ShowToast("「QQ 缓存管家」发现新版本 " + info.Version +
+                                            "，打开程序可在设置里更新", 9000, true);
                             Logger.Log("已弹出更新通知（开机模式，仅提示）");
                         }
                     }
@@ -2097,7 +2097,8 @@ namespace QQCacheTray
                         return;
                     }
 
-                    Toast.ShowToast("发现新版本 " + info.Version + "，点托盘「设置」可更新", 8000, true);
+                    Toast.ShowToast("「QQ 缓存管家」发现新版本 " + info.Version +
+                                    "，点托盘「设置」可更新", 9000, true);
 
                     // 先弹通知，1.5 秒后再挂任务栏按钮并闪烁，形成「先提示、后闪烁」的先后顺序
                     string ver = info.Version;
@@ -2212,7 +2213,8 @@ namespace QQCacheTray
 
             if (_pendingUpdate != null)
             {
-                Toast.ShowToast("发现新版本 " + _pendingUpdate.Version + "，点托盘「设置」可更新", 8000, true);
+                Toast.ShowToast("「QQ 缓存管家」发现新版本 " + _pendingUpdate.Version +
+                                "，点托盘「设置」可更新", 9000, true);
             }
         }
 
@@ -3699,14 +3701,20 @@ namespace QQCacheTray
             ShowInTaskbar = false;
             TopMost = false;
             BackColor = Color.FromArgb(30, 30, 30);
-            Size = new Size(340, 92);
             Opacity = 0.96;
+            Font = new Font("Microsoft YaHei UI", 9F);
 
             Label lbl = new Label();
             lbl.Text = text;
             lbl.ForeColor = Color.White;
             lbl.Font = new Font("Microsoft YaHei UI", 9F);
-            lbl.SetBounds(14, 10, 312, 72);
+
+            Size need = TextRenderer.MeasureText(text, lbl.Font, new Size(312, 4000),
+                TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
+            int textHeight = Math.Max(need.Height + 8, 56);
+
+            Size = new Size(340, textHeight + 20);
+            lbl.SetBounds(14, 10, 312, textHeight);
             Controls.Add(lbl);
 
             Rectangle wa = Screen.PrimaryScreen.WorkingArea;
