@@ -21,7 +21,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("QQ 缓存管家")]
 [assembly: System.Reflection.AssemblyDescription("定时清理 QQ 本地聊天缓存")]
-[assembly: System.Reflection.AssemblyVersion("1.2.6.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.7.0")]
 
 namespace QQCacheTray
 {
@@ -2123,7 +2123,34 @@ namespace QQCacheTray
             ThreadPool.QueueUserWorkItem(delegate
             {
                 string err;
-                string file = SelfUpdater.Download(info.Url, info.Sha256, out err);
+                string actual;
+                string file = SelfUpdater.Download(info.Url, info.Sha256, out err, out actual);
+
+                // 清单可能刚被重新发布：重新拉一次，若下载到的文件和新清单一致就继续
+                if (file == null && !string.IsNullOrEmpty(actual))
+                {
+                    try
+                    {
+                        string manifest = string.IsNullOrEmpty(_cfg.UpdateUrl)
+                            ? UpdateChecker.DefaultManifestUrl
+                            : _cfg.UpdateUrl;
+                        UpdateChecker.Info again = UpdateChecker.Fetch(manifest);
+
+                        if (again != null && string.Equals(again.Sha256, actual, StringComparison.OrdinalIgnoreCase))
+                        {
+                            Logger.Log("清单已更新，按最新哈希接受下载文件");
+                            file = Path.Combine(Path.GetTempPath(), "QQCacheTray_update.exe");
+                            info = again;
+                            err = null;
+                        }
+                    }
+                    catch { }
+                }
+
+                if (file == null && !string.IsNullOrEmpty(actual))
+                {
+                    try { File.Delete(Path.Combine(Path.GetTempPath(), "QQCacheTray_update.exe")); } catch { }
+                }
 
                 PostToUi(delegate
                 {
@@ -3447,7 +3474,14 @@ namespace QQCacheTray
 
         public static string Download(string url, string expectedSha, out string error)
         {
+            string actual;
+            return Download(url, expectedSha, out error, out actual);
+        }
+
+        public static string Download(string url, string expectedSha, out string error, out string actualSha)
+        {
             error = "";
+            actualSha = "";
             string tmp = Path.Combine(Path.GetTempPath(), "QQCacheTray_update.exe");
 
             try
@@ -3458,16 +3492,15 @@ namespace QQCacheTray
                     wc.DownloadFile(url, tmp);
                 }
 
-                if (!string.IsNullOrEmpty(expectedSha))
+                actualSha = Sha256(tmp);
+
+                if (!string.IsNullOrEmpty(expectedSha) &&
+                    !string.Equals(actualSha, expectedSha, StringComparison.OrdinalIgnoreCase))
                 {
-                    string actual = Sha256(tmp);
-                    if (!string.Equals(actual, expectedSha, StringComparison.OrdinalIgnoreCase))
-                    {
-                        try { File.Delete(tmp); } catch { }
-                        error = "SHA-256 校验失败（清单 " + expectedSha.Substring(0, 12) +
-                                "… / 实际 " + actual.Substring(0, 12) + "…）";
-                        return null;
-                    }
+                    // 先不删：可能是清单刚被重新发布（CI 重建后哈希变了），交给上层复核
+                    error = "SHA-256 校验失败（清单 " + expectedSha.Substring(0, 12) +
+                            "… / 实际 " + actualSha.Substring(0, 12) + "…）";
+                    return null;
                 }
 
                 return tmp;
