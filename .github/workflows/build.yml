@@ -23,12 +23,35 @@ jobs:
         shell: pwsh
         run: |
           $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-          & $csc /nologo /target:winexe /codepage:65001 /optimize+ `
-            /win32icon:assets/QQCacheTray.ico /win32manifest:app.manifest `
-            /out:QQCacheTray.exe `
-            /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll `
-            src/QQCacheTray.cs
-          if ($LASTEXITCODE -ne 0) { throw "csc failed: $LASTEXITCODE" }
+          if (-not (Test-Path $csc)) {
+            $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
+          }
+          if (-not (Test-Path $csc)) { throw "csc.exe not found (.NET Framework missing?)" }
+
+          Write-Host "csc = $csc"
+          Write-Host "cwd = $(Get-Location)"
+
+          $cscArgs = @(
+            '/nologo',
+            '/target:winexe',
+            '/codepage:65001',
+            '/optimize+',
+            '/win32icon:assets/QQCacheTray.ico',
+            '/win32manifest:app.manifest',
+            '/out:QQCacheTray.exe',
+            '/r:System.dll',
+            '/r:System.Core.dll',
+            '/r:System.Drawing.dll',
+            '/r:System.Windows.Forms.dll',
+            'src/QQCacheTray.cs'
+          )
+
+          & $csc @cscArgs > build.log 2>&1
+          $code = $LASTEXITCODE
+          Get-Content build.log
+
+          if ($code -ne 0) { throw "csc failed: $code" }
+          if (-not (Test-Path QQCacheTray.exe)) { throw "QQCacheTray.exe not produced" }
 
       - name: Version and hash
         shell: pwsh
@@ -37,8 +60,9 @@ jobs:
           if ($tag -match '^v(.+)$') { $ver = $Matches[1] } else { $ver = "0.0.0" }
           $sha = (Get-FileHash QQCacheTray.exe -Algorithm SHA256).Hash.ToLower()
           "VERSION=$ver" >> $env:GITHUB_ENV
-          "SHA256=$sha"  >> $env:GITHUB_ENV
-          Write-Host "version=$ver sha256=$sha"
+          "SHA256=$sha" >> $env:GITHUB_ENV
+          Write-Host "version=$ver"
+          Write-Host "sha256=$sha"
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -56,17 +80,17 @@ jobs:
         shell: pwsh
         run: |
           $repo = "${{ github.repository }}"
-          $tag  = "${{ github.ref_name }}"
+          $tag = "${{ github.ref_name }}"
           $json = [ordered]@{
             version = $env:VERSION
-            url     = "https://github.com/$repo/releases/download/$tag/QQCacheTray.exe"
-            sha256  = $env:SHA256
-            notes   = "见 Release 页面"
+            url = "https://github.com/$repo/releases/download/$tag/QQCacheTray.exe"
+            sha256 = $env:SHA256
+            notes = "see release page"
           } | ConvertTo-Json
 
           Set-Content -Path latest.json -Value $json -Encoding UTF8
 
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add latest.json
           git commit -m "chore: update latest.json for $tag"
