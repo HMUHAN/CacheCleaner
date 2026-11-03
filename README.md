@@ -14,7 +14,13 @@
 
 ## 下载与安装
 
-到 [Releases](../../releases) 下载 `QQCacheTray.exe`，放到任意文件夹，双击运行。
+到 [Releases](../../releases) 下载 **`CacheCleaner-<版本>.zip`**，解压到任意文件夹（不要直接在桌面或下载目录里运行），
+然后双击 `QQCacheTray.exe`。
+
+> 为什么要用压缩包：程序会在 **exe 同级目录**生成 `data\`（配置、日志）。
+> 直接双击桌面上的 exe 会把 `data\` 建在桌面上；解压到文件夹就没这个问题。
+>
+> 之后的**升级**只需要下载 `QQCacheTray.exe` 覆盖旧文件，或者在程序里点「立即更新」。
 
 程序自带 `requireAdministrator` 清单，**启动时会出现 UAC 提示，点“是”**。
 （本工具需要删除 `C:\Users\...` 下的缓存，没有管理员权限做不到。）

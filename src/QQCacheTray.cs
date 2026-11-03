@@ -21,7 +21,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("QQ 缓存管家")]
 [assembly: System.Reflection.AssemblyDescription("定时清理 QQ 本地聊天缓存")]
-[assembly: System.Reflection.AssemblyVersion("1.2.2.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.3.0")]
 
 namespace QQCacheTray
 {
@@ -163,9 +163,69 @@ namespace QQCacheTray
 
                 if (did) return 0;
 
-                Logger.Log("未到期，90 秒后自动退出");
+                // 未到期：在 90 秒窗口里顺带查一次更新；弹窗期间不退出，
+                // 选了“立即更新”就先完成替换再退出，不会被 90 秒打断
                 DateTime until = DateTime.Now.AddSeconds(90);
-                while (DateTime.Now < until) Thread.Sleep(1000);
+
+                if (cfg.UpdateCheck && (DateTime.Now - cfg.LastUpdateCheck).TotalDays >= 1)
+                {
+                    try
+                    {
+                        string url = string.IsNullOrEmpty(cfg.UpdateUrl)
+                            ? UpdateChecker.DefaultManifestUrl
+                            : cfg.UpdateUrl;
+
+                        UpdateChecker.Info info = UpdateChecker.Fetch(url);
+                        cfg.LastUpdateCheck = DateTime.Now;
+                        cfg.Save();
+
+                        if (info != null && UpdateChecker.IsNewer(info.Version))
+                        {
+                            Logger.Log("开机检查发现新版本：" + info.Version);
+
+                            bool canSelf = !string.IsNullOrEmpty(info.Sha256);
+                            DialogResult r;
+
+                            using (Form f = UpdatePrompt.Build(
+                                       UpdateChecker.CurrentVersion.ToString(), info, canSelf))
+                            {
+                                r = f.ShowDialog();
+                            }
+
+                            if (r == DialogResult.Yes)
+                            {
+                                string err;
+                                string file = SelfUpdater.Download(info.Url, info.Sha256, out err);
+
+                                if (file == null)
+                                {
+                                    Logger.Log("开机更新下载失败：" + err);
+                                }
+                                else
+                                {
+                                    string err2;
+                                    if (SelfUpdater.Apply(file, info.Sha256, "--boot", out err2))
+                                    {
+                                        Logger.Log("开机更新已就绪，替换后将以 --boot 重启并重新计时 90 秒");
+                                        return 0;
+                                    }
+                                    Logger.Log("开机更新无法替换：" + err2);
+                                }
+                            }
+                            else if (r == DialogResult.OK && !string.IsNullOrEmpty(info.Url))
+                            {
+                                try { Process.Start(info.Url); } catch { }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log("开机检查更新失败：" + ex.Message);
+                    }
+                }
+
+                Logger.Log("未到期，90 秒后自动退出");
+                while (DateTime.Now < until) Thread.Sleep(500);
                 Logger.Log("已退出");
                 return 0;
             }
@@ -574,9 +634,19 @@ namespace QQCacheTray
                 string over = Environment.GetEnvironmentVariable("QQCACHE_DATA");
                 if (!string.IsNullOrEmpty(over)) { _dir = over; return _dir; }
 
-                string portable = Path.Combine(
-                    Path.GetDirectoryName(Application.ExecutablePath), "data");
-                if (TryCreate(portable)) { _dir = portable; return _dir; }
+                string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
+
+                // 放在桌面/下载目录时不往那里写 data，改用本地应用数据目录
+                if (!IsAwkwardLocation(exeDir))
+                {
+                    string portable = Path.Combine(exeDir, "data");
+                    if (TryCreate(portable)) { _dir = portable; return _dir; }
+                }
+
+                string local = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "CacheCleaner");
+                if (TryCreate(local)) { _dir = local; return _dir; }
 
                 string common = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
@@ -612,6 +682,37 @@ namespace QQCacheTray
 
         // 不仅看目录在不在，还真写一个文件试试：
         // 提权实例建过目录之后，低权限实例也能看到目录存在，但写不进去
+        // 桌面 / 下载 / 临时目录：这些地方不适合生成 data
+        private static bool IsAwkwardLocation(string dir)
+        {
+            if (string.IsNullOrEmpty(dir)) return false;
+
+            try
+            {
+                string full = Path.GetFullPath(dir).TrimEnd('\\');
+
+                string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                string[] bad = new string[]
+                {
+                    Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                    Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+                    Path.Combine(profile, "Desktop"),
+                    Path.Combine(profile, "Downloads"),
+                    Path.GetTempPath()
+                };
+
+                foreach (string b in bad)
+                {
+                    if (string.IsNullOrEmpty(b)) continue;
+                    if (string.Equals(full, Path.GetFullPath(b).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
         private static bool TryCreate(string path)
         {
             try
@@ -2031,7 +2132,7 @@ namespace QQCacheTray
 
                     Logger.Log("更新包已校验：" + file);
                     string err2;
-                    if (SelfUpdater.Apply(file, info.Sha256, out err2))
+                    if (SelfUpdater.Apply(file, info.Sha256, "", out err2))
                     {
                         Logger.Log("准备重启并替换为新版本");
                         ExitTray();
@@ -3127,7 +3228,7 @@ namespace QQCacheTray
             }
         }
 
-        public static bool Apply(string newExe, string expectedSha, out string error)
+        public static bool Apply(string newExe, string expectedSha, string restartArgs, out string error)
         {
             error = "";
             try
@@ -3150,7 +3251,9 @@ namespace QQCacheTray
                 body.AppendLine("  del \"" + newExe + "\"");
                 body.AppendLine("  exit /b 1");
                 body.AppendLine(")");
-                body.AppendLine("start \"\" \"" + target + "\"");
+                string startLine = "start \"\" \"" + target + "\"";
+                if (!string.IsNullOrEmpty(restartArgs)) startLine += " " + restartArgs;
+                body.AppendLine(startLine);
                 body.AppendLine("del \"" + newExe + "\"");
                 body.AppendLine("del \"%~f0\"");
 

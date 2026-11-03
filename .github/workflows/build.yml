@@ -77,16 +77,30 @@ jobs:
           Write-Host "version=$ver"
           Write-Host "sha256=$sha"
 
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force payload | Out-Null
+          Copy-Item QQCacheTray.exe payload\
+          Copy-Item assets\QQCacheTray.ico payload\
+          Copy-Item README.md payload\
+          Compress-Archive -Path payload\* -DestinationPath "CacheCleaner-$env:VERSION.zip" -Force
+          Get-Item "CacheCleaner-$env:VERSION.zip" | Format-List Name,Length
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: QQCacheTray.exe
+          files: |
+            QQCacheTray.exe
+            CacheCleaner-*.zip
           generate_release_notes: true
           body: |
-            下载 `QQCacheTray.exe` 覆盖旧文件即可。
+            **首次使用**：下载 `CacheCleaner-*.zip`，解压到任意文件夹后运行 `QQCacheTray.exe`。
 
-            - 程序需要管理员权限（会弹 UAC）
-            - `data\` 下的配置和日志不会被覆盖
+            **更新**：下载 `QQCacheTray.exe` 覆盖旧文件即可（程序内「立即更新」用的也是这个文件）。
+
+            - 需要管理员权限（会弹 UAC）
+            - `data\` 会在 exe 同级目录生成，解压到文件夹可避免把配置丢在桌面上
 
       - name: Update latest.json
         if: startsWith(github.ref, 'refs/tags/')
