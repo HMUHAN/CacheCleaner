@@ -101,7 +101,12 @@ https://raw.githubusercontent.com/<你的用户名>/<仓库名>/main/latest.json
 }
 ```
 
-比当前版本新就弹提示，点「打开下载页」用浏览器打开 `url`，手动下载覆盖。
+比当前版本新就弹提示：
+
+- 清单里**有 `sha256`** → 显示「立即更新」：自动下载、校验哈希、关闭程序、替换 exe 并重启；
+- 清单里**没有 `sha256`** → 只显示「打开下载页」，手动下载覆盖（安全兜底）。
+
+哈希不匹配会直接丢弃下载文件并报错，不会执行替换。
 
 **要改这个地址，只需改一处**：`src/QQCacheTray.cs` 里的
 `UpdateChecker.DefaultManifestUrl`；也可以在 `data\config.ini` 里加 `update_url=...` 覆盖。

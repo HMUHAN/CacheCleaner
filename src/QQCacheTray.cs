@@ -10,6 +10,7 @@ using System.Drawing.Drawing2D;
 using System.Globalization;
 using System.IO;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Runtime.InteropServices;
@@ -20,7 +21,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("QQ 缓存管家")]
 [assembly: System.Reflection.AssemblyDescription("定时清理 QQ 本地聊天缓存")]
-[assembly: System.Reflection.AssemblyVersion("1.1.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
 
 namespace QQCacheTray
 {
@@ -373,6 +374,14 @@ namespace QQCacheTray
                 sb.AppendLine("更新解析: " + (uOk ? "PASS" : "FAIL")
                               + " 版本=" + (ui == null ? "null" : ui.Version)
                               + " 当前=" + UpdateChecker.CurrentVersion);
+
+                string tmpFile = Path.Combine(Config.Dir, "selftest-hash.txt");
+                File.WriteAllText(tmpFile, "abc");
+                string h1 = SelfUpdater.Sha256(tmpFile);
+                File.Delete(tmpFile);
+                bool hOk = h1.Length == 64 &&
+                           h1 == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+                sb.AppendLine("哈希校验: " + (hOk ? "PASS" : "FAIL") + " sha256(abc)=" + h1.Substring(0, 12) + "…");
 
                 sb.AppendLine("常驻判定: " + (rOk ? "PASS" : "FAIL")
                               + " 都关=" + Cleaner.WillStayResident(r1)
@@ -1984,12 +1993,53 @@ namespace QQCacheTray
                     }
 
                     Logger.Log("发现新版本：" + info.Version);
-                    using (Form f = UpdatePrompt.Build(UpdateChecker.CurrentVersion.ToString(), info))
+                    bool canSelfUpdate = !string.IsNullOrEmpty(info.Sha256);
+                    if (!canSelfUpdate) Logger.Log("清单没有 sha256，只提供下载页");
+
+                    using (Form f = UpdatePrompt.Build(UpdateChecker.CurrentVersion.ToString(), info, canSelfUpdate))
                     {
-                        if (f.ShowDialog() == DialogResult.OK && !string.IsNullOrEmpty(info.Url))
+                        DialogResult r = f.ShowDialog();
+
+                        if (r == DialogResult.Yes) DoSelfUpdate(info);
+                        else if (r == DialogResult.OK && !string.IsNullOrEmpty(info.Url))
                         {
                             try { Process.Start(info.Url); } catch { }
                         }
+                    }
+                });
+            });
+        }
+
+        private void DoSelfUpdate(UpdateChecker.Info info)
+        {
+            Toast.ShowToast("正在下载更新，请稍候…");
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string err;
+                string file = SelfUpdater.Download(info.Url, info.Sha256, out err);
+
+                PostToUi(delegate
+                {
+                    if (file == null)
+                    {
+                        Logger.Log("更新下载失败：" + err);
+                        MessageBox.Show("更新失败：" + err + "\n\n可以点「下载页」手动下载。",
+                            "QQ 缓存管家", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+
+                    Logger.Log("更新包已校验：" + file);
+                    string err2;
+                    if (SelfUpdater.Apply(file, info.Sha256, out err2))
+                    {
+                        Logger.Log("准备重启并替换为新版本");
+                        ExitTray();
+                    }
+                    else
+                    {
+                        MessageBox.Show("无法启动更新程序：" + err2,
+                            "QQ 缓存管家", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }
                 });
             });
@@ -3027,10 +3077,103 @@ namespace QQCacheTray
         }
     }
 
+    // 自动替换自身：下载 → 校验 → 等进程退出 → 覆盖 → 重启
+    internal static class SelfUpdater
+    {
+        public static string Sha256(string path)
+        {
+            using (SHA256 sha = SHA256.Create())
+            using (FileStream fs = File.OpenRead(path))
+            {
+                byte[] hash = sha.ComputeHash(fs);
+                StringBuilder sb = new StringBuilder(hash.Length * 2);
+                foreach (byte b in hash) sb.Append(b.ToString("x2"));
+                return sb.ToString();
+            }
+        }
+
+        public static string Download(string url, string expectedSha, out string error)
+        {
+            error = "";
+            string tmp = Path.Combine(Path.GetTempPath(), "QQCacheTray_update.exe");
+
+            try
+            {
+                using (WebClient wc = new WebClient())
+                {
+                    wc.Headers.Add("User-Agent", "QQCacheTray/" + UpdateChecker.CurrentVersion);
+                    wc.DownloadFile(url, tmp);
+                }
+
+                if (!string.IsNullOrEmpty(expectedSha))
+                {
+                    string actual = Sha256(tmp);
+                    if (!string.Equals(actual, expectedSha, StringComparison.OrdinalIgnoreCase))
+                    {
+                        try { File.Delete(tmp); } catch { }
+                        error = "SHA-256 校验失败（清单 " + expectedSha.Substring(0, 12) +
+                                "… / 实际 " + actual.Substring(0, 12) + "…）";
+                        return null;
+                    }
+                }
+
+                return tmp;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+                return null;
+            }
+        }
+
+        public static bool Apply(string newExe, string expectedSha, out string error)
+        {
+            error = "";
+            try
+            {
+                string target = Application.ExecutablePath;
+                string cmdPath = Path.Combine(Path.GetTempPath(), "qqcachetray-update.cmd");
+                int pid = Process.GetCurrentProcess().Id;
+
+                StringBuilder body = new StringBuilder();
+                body.AppendLine("@echo off");
+                body.AppendLine("setlocal");
+                body.AppendLine(":wait");
+                body.AppendLine("tasklist /FI \"PID eq " + pid + "\" | find \"" + pid + "\" >nul");
+                body.AppendLine("if not errorlevel 1 (");
+                body.AppendLine("  timeout /t 1 /nobreak >nul");
+                body.AppendLine("  goto wait");
+                body.AppendLine(")");
+                body.AppendLine("copy /y \"" + newExe + "\" \"" + target + "\" >nul");
+                body.AppendLine("if errorlevel 1 (");
+                body.AppendLine("  del \"" + newExe + "\"");
+                body.AppendLine("  exit /b 1");
+                body.AppendLine(")");
+                body.AppendLine("start \"\" \"" + target + "\"");
+                body.AppendLine("del \"" + newExe + "\"");
+                body.AppendLine("del \"%~f0\"");
+
+                File.WriteAllText(cmdPath, body.ToString(), Encoding.Default);
+
+                ProcessStartInfo psi = new ProcessStartInfo("cmd.exe", "/c \"" + cmdPath + "\"");
+                psi.CreateNoWindow = true;
+                psi.UseShellExecute = false;
+                Process.Start(psi);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+    }
+
     // 发现新版本时的提示
     internal static class UpdatePrompt
     {
-        public static Form Build(string current, UpdateChecker.Info info)
+        public static Form Build(string current, UpdateChecker.Info info, bool canSelfUpdate)
         {
             Form f = new Form();
             f.Text = "QQ 缓存管家 - 发现新版本";
@@ -3050,19 +3193,26 @@ namespace QQCacheTray
             l.SetBounds(16, 14, 438, 124);
             f.Controls.Add(l);
 
+            Button update = new Button();
+            update.Text = "立即更新";
+            update.SetBounds(104, 160, 120, 32);
+            update.DialogResult = DialogResult.Yes;
+            update.Visible = canSelfUpdate;
+
             Button open = new Button();
-            open.Text = "打开下载页";
-            open.SetBounds(196, 160, 130, 32);
+            open.Text = canSelfUpdate ? "下载页" : "打开下载页";
+            open.SetBounds(234, 160, 110, 32);
             open.DialogResult = DialogResult.OK;
 
             Button later = new Button();
             later.Text = "稍后";
-            later.SetBounds(336, 160, 120, 32);
+            later.SetBounds(354, 160, 90, 32);
             later.DialogResult = DialogResult.Cancel;
 
+            f.Controls.Add(update);
             f.Controls.Add(open);
             f.Controls.Add(later);
-            f.AcceptButton = open;
+            f.AcceptButton = canSelfUpdate ? update : open;
             f.CancelButton = later;
             return f;
         }
