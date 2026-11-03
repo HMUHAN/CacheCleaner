@@ -21,7 +21,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("QQ 缓存管家")]
 [assembly: System.Reflection.AssemblyDescription("定时清理 QQ 本地聊天缓存")]
-[assembly: System.Reflection.AssemblyVersion("1.2.5.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.6.0")]
 
 namespace QQCacheTray
 {
@@ -2322,8 +2322,8 @@ namespace QQCacheTray
             // 有更新时把更新条显示出来，并闪一下任务栏
             if (UpdateInfo != null)
             {
-                _updateText.Text = "发现新版本 " + UpdateInfo.Version +
-                                   "（当前 " + UpdateChecker.CurrentVersion + "）";
+                _updateText.Text = "发现新版本 " + UpdateInfo.Version;
+                _updateText.Tag = "当前 " + UpdateChecker.CurrentVersion;
                 if (_lblTaskWarn != null) _lblTaskWarn.Visible = false;
                 _updateBar.Visible = true;
                 FlashTaskbar();
@@ -2823,7 +2823,7 @@ namespace QQCacheTray
             Controls.Add(_updateBar);
 
             _updateText = new Label();
-            _updateText.SetBounds(6, 6, 228, 20);
+            _updateText.SetBounds(6, 6, 148, 20);
             _updateText.Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold);
             _updateText.ForeColor = Color.FromArgb(0, 97, 0);       // 深绿字
             _updateText.BackColor = Color.Transparent;
@@ -2831,13 +2831,27 @@ namespace QQCacheTray
 
             Button btnUpdate = new Button();
             btnUpdate.Text = "立即更新";
-            btnUpdate.SetBounds(238, 3, 96, 26);
+            btnUpdate.SetBounds(158, 3, 88, 26);
             btnUpdate.Click += delegate { UpdateNow = true; Close(); };
             _updateBar.Controls.Add(btnUpdate);
 
+            Button btnPage = new Button();
+            btnPage.Text = "下载页";
+            btnPage.SetBounds(250, 3, 76, 26);
+            btnPage.Click += delegate
+            {
+                try
+                {
+                    if (UpdateInfo != null && !string.IsNullOrEmpty(UpdateInfo.Url))
+                        Process.Start(UpdateInfo.Url);
+                }
+                catch { }
+            };
+            _updateBar.Controls.Add(btnPage);
+
             Button btnLater = new Button();
             btnLater.Text = "稍后";
-            btnLater.SetBounds(340, 3, 90, 26);
+            btnLater.SetBounds(330, 3, 60, 26);
             btnLater.Click += delegate { _updateBar.Visible = false; };
             _updateBar.Controls.Add(btnLater);
         }

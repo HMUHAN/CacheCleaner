@@ -1,7 +1,7 @@
 ﻿param(
     [Parameter(Mandatory = $true)][string]$User,
     [string]$Repo = 'CacheCleaner',
-    [string]$Tag = 'v1.2.5',
+    [string]$Tag = 'v1.2.6',
     [switch]$NoPush
 )
 
