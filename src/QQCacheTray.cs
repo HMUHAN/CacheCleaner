@@ -2097,17 +2097,20 @@ namespace QQCacheTray
                         return;
                     }
 
-                    // 手动「检查更新」直接把设置窗口打开，让更新条可见；自动检查只弹通知
-                    if (manual)
-                    {
-                        OpenSettings();
-                        return;
-                    }
-
                     Toast.ShowToast("发现新版本 " + info.Version + "，点托盘「设置」可更新", 8000, true);
 
-                    TaskbarAlert.OnOpen = delegate { OpenSettings(); };
-                    TaskbarAlert.Show("QQ 缓存管家 - 发现新版本 " + info.Version);
+                    // 先弹通知，1.5 秒后再挂任务栏按钮并闪烁，形成「先提示、后闪烁」的先后顺序
+                    string ver = info.Version;
+                    System.Windows.Forms.Timer delay = new System.Windows.Forms.Timer();
+                    delay.Interval = 1500;
+                    delay.Tick += delegate
+                    {
+                        delay.Stop();
+                        delay.Dispose();
+                        TaskbarAlert.OnOpen = delegate { OpenSettings(); };
+                        TaskbarAlert.Show("QQ 缓存管家 - 发现新版本 " + ver);
+                    };
+                    delay.Start();
                 });
             });
         }
@@ -3266,6 +3269,8 @@ namespace QQCacheTray
             public uint dwTimeout;
         }
 
+        private DateTime _shownAt = DateTime.MinValue;
+
         private TaskbarAlert(string title)
         {
             Text = title;
@@ -3281,6 +3286,7 @@ namespace QQCacheTray
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
+            _shownAt = DateTime.Now;
             Flash();
         }
 
@@ -3303,7 +3309,11 @@ namespace QQCacheTray
         {
             base.OnActivated(e);
 
-            // 点任务栏按钮 → 打开设置并收掉提醒
+            // 刚弹出来时的自动激活不算点击；最小化状态下的激活也不算
+            if ((DateTime.Now - _shownAt).TotalMilliseconds < 2000) return;
+            if (WindowState == FormWindowState.Minimized) return;
+
+            // 用户点了任务栏按钮 → 打开设置并收掉提醒
             try
             {
                 Action cb = OnOpen;
