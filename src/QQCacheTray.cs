@@ -21,7 +21,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("QQ 缓存管家")]
 [assembly: System.Reflection.AssemblyDescription("定时清理 QQ 本地聊天缓存")]
-[assembly: System.Reflection.AssemblyVersion("1.2.7.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.8.0")]
 
 namespace QQCacheTray
 {
@@ -167,7 +167,7 @@ namespace QQCacheTray
                 // 选了“立即更新”就先完成替换再退出，不会被 90 秒打断
                 DateTime until = DateTime.Now.AddSeconds(90);
 
-                if (cfg.UpdateCheck && (DateTime.Now - cfg.LastUpdateCheck).TotalDays >= 1)
+                if (cfg.UpdateCheck && (DateTime.Now - cfg.LastUpdateCheck).TotalHours >= 12)
                 {
                     try
                     {
@@ -761,6 +761,7 @@ namespace QQCacheTray
                             case "autostart": c.AutostartEnabled = ParseBool(val, false); break;
                             case "update_check": c.UpdateCheck = ParseBool(val, true); break;
                             case "update_url": c.UpdateUrl = val; break;
+                            case "last_update_check": c.LastUpdateCheck = ParseDateTime(val); break;
                             case "qq_root": c.QqRoot = val; break;
                             case "wx_enabled": c.WxEnabled = ParseBool(val, true); break;
                             case "wx_auto_clean": c.WxAutoCleanEnabled = ParseBool(val, false); break;
@@ -814,6 +815,9 @@ namespace QQCacheTray
                 sb.AppendLine("autostart=" + (AutostartEnabled ? "1" : "0"));
                 sb.AppendLine("update_check=" + (UpdateCheck ? "1" : "0"));
                 sb.AppendLine("update_url=" + (UpdateUrl ?? ""));
+                sb.AppendLine("last_update_check=" + (LastUpdateCheck == DateTime.MinValue
+                    ? ""
+                    : LastUpdateCheck.ToString("yyyy-MM-dd HH:mm:ss")));
                 sb.AppendLine("qq_root=" + (QqRoot ?? ""));
                 sb.AppendLine("wx_enabled=" + (WxEnabled ? "1" : "0"));
                 sb.AppendLine("wx_auto_clean=" + (WxAutoCleanEnabled ? "1" : "0"));
@@ -913,6 +917,13 @@ namespace QQCacheTray
             if (v == "1" || v.Equals("true", StringComparison.OrdinalIgnoreCase) || v == "yes") return true;
             if (v == "0" || v.Equals("false", StringComparison.OrdinalIgnoreCase) || v == "no") return false;
             return def;
+        }
+
+        private static DateTime ParseDateTime(string v)
+        {
+            DateTime dt;
+            if (DateTime.TryParse(v, out dt)) return dt;
+            return DateTime.MinValue;
         }
 
         private static int ParseInt(string v, int def)
@@ -1813,7 +1824,7 @@ namespace QQCacheTray
             RefreshStatus();
             ScheduleCheck(15);
 
-            if (_cfg.UpdateCheck && (DateTime.Now - _cfg.LastUpdateCheck).TotalDays >= 1)
+            if (_cfg.UpdateCheck && (DateTime.Now - _cfg.LastUpdateCheck).TotalHours >= 12)
             {
                 CheckForUpdates(false);
             }
@@ -1931,6 +1942,13 @@ namespace QQCacheTray
             {
                 RunClean(true);
             }
+
+            // 常驻时每 12 小时查一次更新（长时间不重启也能收到通知）
+            if (_cfg.UpdateCheck && (DateTime.Now - _cfg.LastUpdateCheck).TotalHours >= 12)
+            {
+                CheckForUpdates(false);
+            }
+
             _timer.Interval = 60 * 1000;   // 每分钟看一次，到点就清
             _timer.Start();
         }
