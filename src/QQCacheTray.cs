@@ -21,7 +21,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("QQ 缓存管家")]
 [assembly: System.Reflection.AssemblyDescription("定时清理 QQ 本地聊天缓存")]
-[assembly: System.Reflection.AssemblyVersion("1.2.4.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.5.0")]
 
 namespace QQCacheTray
 {
@@ -406,7 +406,7 @@ namespace QQCacheTray
                 UpdateChecker.Info ui = UpdateChecker.Parse(sample);
                 bool uOk = ui != null && ui.Version == "1.2.3"
                            && ui.Url == "https://example.com/a.exe"
-                           && UpdateChecker.IsNewer("1.2.3")
+                           && UpdateChecker.IsNewer((UpdateChecker.CurrentVersion.Major + 1) + ".0.0")
                            && !UpdateChecker.IsNewer(UpdateChecker.CurrentVersion.ToString());
                 sb.AppendLine("更新解析: " + (uOk ? "PASS" : "FAIL")
                               + " 版本=" + (ui == null ? "null" : ui.Version)
@@ -520,6 +520,7 @@ namespace QQCacheTray
                     if (kids[i] is TabPage && kids[j] is TabPage) continue;
                     if (kids[i].Bounds.IntersectsWith(kids[j].Bounds))
                     {
+                        if (!kids[i].Visible || !kids[j].Visible) continue;
                         sb.AppendLine(string.Format("OVERLAP: \"{0}\" <-> \"{1}\"", kids[i].Text, kids[j].Text));
                     }
                 }
@@ -2046,6 +2047,8 @@ namespace QQCacheTray
                 ? UpdateChecker.DefaultManifestUrl
                 : _cfg.UpdateUrl;
 
+            Logger.Log(manual ? "检查更新：手动触发" : "检查更新：启动时自动触发");
+
             ThreadPool.QueueUserWorkItem(delegate
             {
                 UpdateChecker.Info info = null;
@@ -2053,6 +2056,10 @@ namespace QQCacheTray
 
                 try { info = UpdateChecker.Fetch(url); }
                 catch (Exception ex) { err = ex.Message; }
+
+                Logger.Log(info == null
+                    ? "检查更新失败：" + (err ?? "清单不完整")
+                    : "检查更新：远端 " + info.Version + "，当前 " + UpdateChecker.CurrentVersion);
 
                 PostToUi(delegate
                 {
@@ -2072,6 +2079,7 @@ namespace QQCacheTray
 
                     if (!UpdateChecker.IsNewer(info.Version))
                     {
+                        Logger.Log("检查更新：已是最新版本");
                         if (manual)
                         {
                             MessageBox.Show("当前已是最新版本 " + UpdateChecker.CurrentVersion + "。",
@@ -2097,6 +2105,9 @@ namespace QQCacheTray
                     }
 
                     Toast.ShowToast("发现新版本 " + info.Version + "，点托盘「设置」可更新", 8000, true);
+
+                    TaskbarAlert.OnOpen = delegate { OpenSettings(); };
+                    TaskbarAlert.Show("QQ 缓存管家 - 发现新版本 " + info.Version);
                 });
             });
         }
@@ -2159,6 +2170,8 @@ namespace QQCacheTray
 
         private void OpenSettings()
         {
+            TaskbarAlert.Dismiss();
+
             bool updateNow = false;
             _settingsOpen = true;
             try
@@ -2311,6 +2324,7 @@ namespace QQCacheTray
             {
                 _updateText.Text = "发现新版本 " + UpdateInfo.Version +
                                    "（当前 " + UpdateChecker.CurrentVersion + "）";
+                if (_lblTaskWarn != null) _lblTaskWarn.Visible = false;
                 _updateBar.Visible = true;
                 FlashTaskbar();
             }
@@ -2802,25 +2816,28 @@ namespace QQCacheTray
         private void BuildUpdateBar()
         {
             _updateBar = new Panel();
-            _updateBar.SetBounds(16, 572, 438, 66);
+            _updateBar.SetBounds(16, 566, 438, 32);
             _updateBar.Visible = false;
             _updateBar.BorderStyle = BorderStyle.FixedSingle;
+            _updateBar.BackColor = Color.FromArgb(223, 246, 221);   // 浅绿
             Controls.Add(_updateBar);
 
             _updateText = new Label();
-            _updateText.SetBounds(8, 6, 420, 22);
-            _updateText.Font = new Font("Microsoft YaHei UI", 9F);
+            _updateText.SetBounds(6, 6, 228, 20);
+            _updateText.Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold);
+            _updateText.ForeColor = Color.FromArgb(0, 97, 0);       // 深绿字
+            _updateText.BackColor = Color.Transparent;
             _updateBar.Controls.Add(_updateText);
 
             Button btnUpdate = new Button();
             btnUpdate.Text = "立即更新";
-            btnUpdate.SetBounds(238, 34, 96, 26);
+            btnUpdate.SetBounds(238, 3, 96, 26);
             btnUpdate.Click += delegate { UpdateNow = true; Close(); };
             _updateBar.Controls.Add(btnUpdate);
 
             Button btnLater = new Button();
             btnLater.Text = "稍后";
-            btnLater.SetBounds(340, 34, 90, 26);
+            btnLater.SetBounds(340, 3, 90, 26);
             btnLater.Click += delegate { _updateBar.Visible = false; };
             _updateBar.Controls.Add(btnLater);
         }
@@ -2921,6 +2938,7 @@ namespace QQCacheTray
         {
             if (!LegacyTask.Exists()) return;
             _lblTaskWarn.Text = "检测到旧的「QQCacheCleaner-Weekly」计划任务仍在运行，可能与本工具重复清理。建议停用它。";
+            if (_updateBar != null) _updateBar.Visible = false;
             _lblTaskWarn.Visible = true;
             _btnKillTask.Visible = true;
         }
@@ -3214,6 +3232,107 @@ namespace QQCacheTray
         }
     }
 
+    // 任务栏提醒：常驻托盘时没有任务栏按钮，有更新时临时挂一个并闪烁
+    internal sealed class TaskbarAlert : Form
+    {
+        private static TaskbarAlert _instance;
+
+        public static Action OnOpen;
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool FlashWindowEx(ref FLASHWINFO pwfi);
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct FLASHWINFO
+        {
+            public uint cbSize;
+            public IntPtr hwnd;
+            public uint dwFlags;
+            public uint uCount;
+            public uint dwTimeout;
+        }
+
+        private TaskbarAlert(string title)
+        {
+            Text = title;
+            ShowInTaskbar = true;
+            ShowIcon = false;
+            FormBorderStyle = FormBorderStyle.FixedToolWindow;
+            WindowState = FormWindowState.Minimized;
+            StartPosition = FormStartPosition.Manual;
+            Location = new Point(-4000, -4000);
+            Size = new Size(200, 100);
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            Flash();
+        }
+
+        public void Flash()
+        {
+            try
+            {
+                FLASHWINFO fi = new FLASHWINFO();
+                fi.cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(FLASHWINFO));
+                fi.hwnd = Handle;
+                fi.dwFlags = 0x3 | 0xC;   // FLASHW_ALL | FLASHW_TIMERNOFG
+                fi.uCount = 10;
+                fi.dwTimeout = 0;
+                FlashWindowEx(ref fi);
+            }
+            catch { }
+        }
+
+        protected override void OnActivated(EventArgs e)
+        {
+            base.OnActivated(e);
+
+            // 点任务栏按钮 → 打开设置并收掉提醒
+            try
+            {
+                Action cb = OnOpen;
+                Dismiss();
+                if (cb != null) cb();
+            }
+            catch { }
+        }
+
+        public static void Show(string title)
+        {
+            try
+            {
+                if (_instance != null && !_instance.IsDisposed)
+                {
+                    _instance.Text = title;
+                    _instance.Flash();
+                    return;
+                }
+
+                _instance = new TaskbarAlert(title);
+                _instance.Show();
+
+                // 60 秒没人理就自己收掉，别在任务栏留一个孤儿按钮
+                System.Windows.Forms.Timer t = new System.Windows.Forms.Timer();
+                t.Interval = 60000;
+                t.Tick += delegate { t.Stop(); t.Dispose(); Dismiss(); };
+                t.Start();
+            }
+            catch { }
+        }
+
+        public static void Dismiss()
+        {
+            try
+            {
+                if (_instance != null && !_instance.IsDisposed) _instance.Close();
+            }
+            catch { }
+            _instance = null;
+        }
+    }
+
     // 检查更新（方案 B）：只做提示，不自动替换
     internal static class UpdateChecker
     {
@@ -3266,10 +3385,15 @@ namespace QQCacheTray
         {
             ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
 
-            HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+            // 加时间戳绕开 raw.githubusercontent 的 CDN 缓存（最长约 5 分钟）
+            string fresh = url + (url.IndexOf('?') >= 0 ? "&" : "?") + "t=" + DateTime.UtcNow.Ticks;
+
+            HttpWebRequest req = (HttpWebRequest)WebRequest.Create(fresh);
             req.Timeout = 8000;
             req.ReadWriteTimeout = 8000;
             req.UserAgent = "QQCacheTray/" + CurrentVersion;
+            req.CachePolicy = new System.Net.Cache.RequestCachePolicy(
+                System.Net.Cache.RequestCacheLevel.NoCacheNoStore);
 
             using (WebResponse resp = req.GetResponse())
             using (Stream stream = resp.GetResponseStream())
