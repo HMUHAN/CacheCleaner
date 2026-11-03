@@ -78,13 +78,21 @@ $mail = & $git config user.email
 if (-not $mail) { Run-Git @('config', 'user.email', "$User@users.noreply.github.com") }
 
 Run-Git @('add', '-A')
-& $git commit -m "feat: cache cleaner $Tag" | Out-Null
-if ($LASTEXITCODE -ne 0) { Write-Host "   （没有新改动或提交失败，继续）" -ForegroundColor DarkGray }
+
+$dirty = & $git status --porcelain
+if ($dirty) {
+    try { & $git commit -m "feat: cache cleaner $Tag" | Out-Null } catch { }
+    Write-Host "   已提交本地改动"
+} else {
+    Write-Host "   没有新改动，跳过提交"
+}
+
 Run-Git @('branch', '-M', 'main')
 
 Write-Host "== 3) 关联远端 ==" -ForegroundColor Cyan
 $url = "https://github.com/$User/$Repo.git"
-& $git remote remove origin 2>$null
+$remotes = & $git remote
+if ($remotes -contains 'origin') { & $git remote remove origin | Out-Null }
 Run-Git @('remote', 'add', 'origin', $url)
 Write-Host "   $url"
 
