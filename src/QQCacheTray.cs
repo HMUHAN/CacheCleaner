@@ -21,7 +21,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("QQ 缓存管家")]
 [assembly: System.Reflection.AssemblyDescription("定时清理 QQ 本地聊天缓存")]
-[assembly: System.Reflection.AssemblyVersion("1.2.3.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.4.0")]
 
 namespace QQCacheTray
 {
@@ -183,39 +183,11 @@ namespace QQCacheTray
                         {
                             Logger.Log("开机检查发现新版本：" + info.Version);
 
-                            bool canSelf = !string.IsNullOrEmpty(info.Sha256);
-                            DialogResult r;
-
-                            using (Form f = UpdatePrompt.Build(
-                                       UpdateChecker.CurrentVersion.ToString(), info, canSelf))
-                            {
-                                r = f.ShowDialog();
-                            }
-
-                            if (r == DialogResult.Yes)
-                            {
-                                string err;
-                                string file = SelfUpdater.Download(info.Url, info.Sha256, out err);
-
-                                if (file == null)
-                                {
-                                    Logger.Log("开机更新下载失败：" + err);
-                                }
-                                else
-                                {
-                                    string err2;
-                                    if (SelfUpdater.Apply(file, info.Sha256, "--boot", out err2))
-                                    {
-                                        Logger.Log("开机更新已就绪，替换后将以 --boot 重启并重新计时 90 秒");
-                                        return 0;
-                                    }
-                                    Logger.Log("开机更新无法替换：" + err2);
-                                }
-                            }
-                            else if (r == DialogResult.OK && !string.IsNullOrEmpty(info.Url))
-                            {
-                                try { Process.Start(info.Url); } catch { }
-                            }
+                            // 启动 5 秒后再提示，别和开机动作抢注意力
+                            Thread.Sleep(5000);
+                            Toast.ShowToast("发现新版本 " + info.Version +
+                                            "：点托盘「设置」即可更新", 9000, true);
+                            Logger.Log("已弹出更新通知（开机模式，仅提示）");
                         }
                     }
                     catch (Exception ex)
@@ -225,7 +197,12 @@ namespace QQCacheTray
                 }
 
                 Logger.Log("未到期，90 秒后自动退出");
-                while (DateTime.Now < until) Thread.Sleep(500);
+                while (DateTime.Now < until)
+                {
+                    // 泵消息，更新通知条才能正常显示并被计时器关掉
+                    Application.DoEvents();
+                    Thread.Sleep(100);
+                }
                 Logger.Log("已退出");
                 return 0;
             }
@@ -473,6 +450,14 @@ namespace QQCacheTray
                     sb.AppendLine("对话框布局: " + (dOk ? "PASS" : "FAIL")
                                   + " 开机提示=" + d1.ClientSize.Width + "x" + d1.ClientSize.Height
                                   + " 过期提示=" + d2.ClientSize.Width + "x" + d2.ClientSize.Height);
+                }
+
+                UpdateChecker.Info ui2 = new UpdateChecker.Info();
+                ui2.Version = "1.2.3"; ui2.Url = "https://example.com/a.exe"; ui2.Sha256 = "abc"; ui2.Notes = "n";
+                using (Form d3 = UpdatePrompt.Build("1.2.2.0", ui2, true))
+                {
+                    foreach (Control c in d3.Controls)
+                        sb.AppendLine("UPD_CTRL: " + c.GetType().Name + " text=[" + c.Text + "] bounds=" + c.Bounds);
                 }
 
                 sb.AppendLine("RESULT: OK");
@@ -1722,6 +1707,8 @@ namespace QQCacheTray
         private readonly Form _marshal;
         private Config _cfg;
         private bool _busy;
+        private bool _settingsOpen;
+        private UpdateChecker.Info _pendingUpdate;
 
         public TrayContext()
         {
@@ -2094,19 +2081,22 @@ namespace QQCacheTray
                     }
 
                     Logger.Log("发现新版本：" + info.Version);
-                    bool canSelfUpdate = !string.IsNullOrEmpty(info.Sha256);
-                    if (!canSelfUpdate) Logger.Log("清单没有 sha256，只提供下载页");
+                    _pendingUpdate = info;
 
-                    using (Form f = UpdatePrompt.Build(UpdateChecker.CurrentVersion.ToString(), info, canSelfUpdate))
+                    if (_settingsOpen)
                     {
-                        DialogResult r = f.ShowDialog();
-
-                        if (r == DialogResult.Yes) DoSelfUpdate(info);
-                        else if (r == DialogResult.OK && !string.IsNullOrEmpty(info.Url))
-                        {
-                            try { Process.Start(info.Url); } catch { }
-                        }
+                        Logger.Log("设置窗口开着，更新条已在界面里");
+                        return;
                     }
+
+                    // 手动「检查更新」直接把设置窗口打开，让更新条可见；自动检查只弹通知
+                    if (manual)
+                    {
+                        OpenSettings();
+                        return;
+                    }
+
+                    Toast.ShowToast("发现新版本 " + info.Version + "，点托盘「设置」可更新", 8000, true);
                 });
             });
         }
@@ -2169,18 +2159,60 @@ namespace QQCacheTray
 
         private void OpenSettings()
         {
-            using (SettingsForm f = new SettingsForm(_cfg))
+            bool updateNow = false;
+            _settingsOpen = true;
+            try
+            {
+                using (SettingsForm f = new SettingsForm(_cfg))
+                {
+                    f.UpdateInfo = _pendingUpdate;
+                    DialogResult r = f.ShowDialog();
+                    updateNow = f.UpdateNow;
+                    if (r == DialogResult.OK)
+                    {
+                        _cfg = f.Result;
+                        _cfg.Save();
+                        _cfg.SaveLastRun(f.Result.LastRun);
+                        if (f.Result.WxLastRun != DateTime.MinValue) _cfg.SaveWxLastRun(f.Result.WxLastRun);
+                        RefreshStatus();
+
+                        if (_cfg.PendingCleanQq || _cfg.PendingCleanWx) RunPendingCleans();
+                    }
+                }
+            }
+            finally
+            {
+                _settingsOpen = false;
+            }
+
+            // 设置窗口期间发现的新版本，关掉之后再提示
+            if (updateNow && _pendingUpdate != null)
+            {
+                UpdateChecker.Info info = _pendingUpdate;
+                _pendingUpdate = null;
+                DoSelfUpdate(info);
+                return;
+            }
+
+            if (_pendingUpdate != null)
+            {
+                Toast.ShowToast("发现新版本 " + _pendingUpdate.Version + "，点托盘「设置」可更新", 8000, true);
+            }
+        }
+
+        private void ShowUpdatePrompt(UpdateChecker.Info info)
+        {
+            bool canSelfUpdate = !string.IsNullOrEmpty(info.Sha256);
+            if (!canSelfUpdate) Logger.Log("清单没有 sha256，只提供下载页");
+
+            using (Form f = UpdatePrompt.Build(UpdateChecker.CurrentVersion.ToString(), info, canSelfUpdate))
             {
                 DialogResult r = f.ShowDialog();
-                if (r == DialogResult.OK)
-                {
-                    _cfg = f.Result;
-                    _cfg.Save();
-                    _cfg.SaveLastRun(f.Result.LastRun);
-                    if (f.Result.WxLastRun != DateTime.MinValue) _cfg.SaveWxLastRun(f.Result.WxLastRun);
-                    RefreshStatus();
 
-                    if (_cfg.PendingCleanQq || _cfg.PendingCleanWx) RunPendingCleans();
+                if (r == DialogResult.Yes) DoSelfUpdate(info);
+                else if (r == DialogResult.OK && !string.IsNullOrEmpty(info.Url))
+                {
+                    try { Process.Start(info.Url); } catch { }
                 }
             }
         }
@@ -2208,6 +2240,8 @@ namespace QQCacheTray
     {
         private readonly Config _cfg;
         public Config Result;
+        public UpdateChecker.Info UpdateInfo;    // 有更新时传入，界面顶部显示更新条
+        public bool UpdateNow;                   // 用户在更新条上点了“立即更新”
 
         private AppPanel _qq;
         private AppPanel _wx;
@@ -2271,6 +2305,15 @@ namespace QQCacheTray
                 UpdateCountdown(_qq);
             };
             _tick.Start();
+
+            // 有更新时把更新条显示出来，并闪一下任务栏
+            if (UpdateInfo != null)
+            {
+                _updateText.Text = "发现新版本 " + UpdateInfo.Version +
+                                   "（当前 " + UpdateChecker.CurrentVersion + "）";
+                _updateBar.Visible = true;
+                FlashTaskbar();
+            }
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
@@ -2336,6 +2379,8 @@ namespace QQCacheTray
             btnCancel.SetBounds(342, 648, 100, 34);
             btnCancel.DialogResult = DialogResult.Cancel;
             Controls.Add(btnCancel);
+
+            BuildUpdateBar();
 
             AcceptButton = btnSave;
             CancelButton = btnCancel;
@@ -2736,6 +2781,63 @@ namespace QQCacheTray
                 }
                 catch { }
             });
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool FlashWindowEx(ref FLASHWINFO pwfi);
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct FLASHWINFO
+        {
+            public uint cbSize;
+            public IntPtr hwnd;
+            public uint dwFlags;
+            public uint uCount;
+            public uint dwTimeout;
+        }
+
+        private Panel _updateBar;
+        private Label _updateText;
+
+        private void BuildUpdateBar()
+        {
+            _updateBar = new Panel();
+            _updateBar.SetBounds(16, 572, 438, 66);
+            _updateBar.Visible = false;
+            _updateBar.BorderStyle = BorderStyle.FixedSingle;
+            Controls.Add(_updateBar);
+
+            _updateText = new Label();
+            _updateText.SetBounds(8, 6, 420, 22);
+            _updateText.Font = new Font("Microsoft YaHei UI", 9F);
+            _updateBar.Controls.Add(_updateText);
+
+            Button btnUpdate = new Button();
+            btnUpdate.Text = "立即更新";
+            btnUpdate.SetBounds(238, 34, 96, 26);
+            btnUpdate.Click += delegate { UpdateNow = true; Close(); };
+            _updateBar.Controls.Add(btnUpdate);
+
+            Button btnLater = new Button();
+            btnLater.Text = "稍后";
+            btnLater.SetBounds(340, 34, 90, 26);
+            btnLater.Click += delegate { _updateBar.Visible = false; };
+            _updateBar.Controls.Add(btnLater);
+        }
+
+        private void FlashTaskbar()
+        {
+            try
+            {
+                FLASHWINFO fi = new FLASHWINFO();
+                fi.cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(FLASHWINFO));
+                fi.hwnd = Handle;
+                fi.dwFlags = 0x3 | 0xC;   // FLASHW_ALL | FLASHW_TIMERNOFG
+                fi.uCount = 6;
+                fi.dwTimeout = 0;
+                FlashWindowEx(ref fi);
+            }
+            catch { }
         }
 
         private void SaveAndClose()
@@ -3278,46 +3380,87 @@ namespace QQCacheTray
     {
         public static Form Build(string current, UpdateChecker.Info info, bool canSelfUpdate)
         {
-            Form f = new Form();
-            f.Text = "QQ 缓存管家 - 发现新版本";
-            f.FormBorderStyle = FormBorderStyle.FixedDialog;
-            f.StartPosition = FormStartPosition.CenterScreen;
-            f.MaximizeBox = false;
-            f.MinimizeBox = false;
-            f.ShowInTaskbar = false;
-            f.AutoScaleMode = AutoScaleMode.None;
-            f.Font = new Font("Microsoft YaHei UI", 9F);
-            f.ClientSize = new Size(470, 214);
+            Form f = PromptLayout.NewForm("QQ 缓存管家 - 发现新版本", new Size(480, 220));
 
-            Label l = new Label();
             string notes = string.IsNullOrEmpty(info.Notes) ? "" : "\r\n更新说明：" + info.Notes;
-            l.Text = "当前版本：" + current + "\r\n最新版本：" + info.Version + notes +
-                     "\r\n\r\n点「打开下载页」后，下载新版本覆盖原 exe 即可，配置不会丢。";
-            l.SetBounds(16, 14, 438, 124);
+            string text = "当前版本：" + current + "\r\n最新版本：" + info.Version + notes +
+                          "\r\n\r\n" +
+                          (canSelfUpdate
+                              ? "点「立即更新」：自动下载、校验并重启完成升级。"
+                              : "点「打开下载页」：手动下载后覆盖原 exe，配置不会丢。");
+
+            Label l = PromptLayout.MakeLabel(f, text, 16, 14, PromptLayout.MaxTextWidth);
             f.Controls.Add(l);
 
-            Button update = new Button();
-            update.Text = "立即更新";
-            update.SetBounds(104, 160, 120, 32);
-            update.DialogResult = DialogResult.Yes;
+            Button update = PromptLayout.MakeButton(f, "立即更新", DialogResult.Yes);
+            Button open = PromptLayout.MakeButton(f, canSelfUpdate ? "下载页" : "打开下载页", DialogResult.OK);
+            Button later = PromptLayout.MakeButton(f, "稍后", DialogResult.Cancel);
+
+            int y = l.Bottom + 16;
+            int right = 16 + PromptLayout.MaxTextWidth;
+
+            later.Location = new Point(right - later.Width, y);
+            open.Location = new Point(later.Left - PromptLayout.Gap - open.Width, y);
+            update.Location = new Point(open.Left - PromptLayout.Gap - update.Width, y);
             update.Visible = canSelfUpdate;
-
-            Button open = new Button();
-            open.Text = canSelfUpdate ? "下载页" : "打开下载页";
-            open.SetBounds(234, 160, 110, 32);
-            open.DialogResult = DialogResult.OK;
-
-            Button later = new Button();
-            later.Text = "稍后";
-            later.SetBounds(354, 160, 90, 32);
-            later.DialogResult = DialogResult.Cancel;
 
             f.Controls.Add(update);
             f.Controls.Add(open);
             f.Controls.Add(later);
             f.AcceptButton = canSelfUpdate ? update : open;
             f.CancelButton = later;
+            f.ClientSize = new Size(right + 16, y + later.Height + 16);
             return f;
+        }
+    }
+
+    // 提示框排版：按字体实测尺寸，避免高 DPI 下按钮空白 / 文字被裁
+    internal static class PromptLayout
+    {
+        public const int Pad = 16;
+        public const int Gap = 10;
+        public const int MaxTextWidth = 440;
+
+        public static Form NewForm(string title, Size client)
+        {
+            Form f = new Form();
+            f.Text = title;
+            f.FormBorderStyle = FormBorderStyle.FixedDialog;
+            f.StartPosition = FormStartPosition.CenterScreen;
+            f.MaximizeBox = false;
+            f.MinimizeBox = false;
+            f.ShowInTaskbar = false;
+            f.AutoScaleMode = AutoScaleMode.None;
+            f.Font = SystemFonts.MessageBoxFont;
+            f.ClientSize = client;
+            return f;
+        }
+
+        public static Label MakeLabel(Form f, string text, int x, int y, int width)
+        {
+            Label l = new Label();
+            l.Font = f.Font;
+            l.Text = text;
+            l.AutoSize = false;
+
+            Size need = TextRenderer.MeasureText(text, f.Font, new Size(width, 4000),
+                TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
+
+            l.SetBounds(x, y, width, Math.Max(need.Height + 6, f.Font.Height + 6));
+            return l;
+        }
+
+        public static Button MakeButton(Form f, string text, DialogResult result)
+        {
+            Button b = new Button();
+            b.Font = f.Font;
+            b.Text = text;
+            b.DialogResult = result;
+            b.AutoSize = false;
+
+            Size need = TextRenderer.MeasureText(text, f.Font);
+            b.Size = new Size(Math.Max(96, need.Width + 36), Math.Max(30, need.Height + 14));
+            return b;
         }
     }
 
@@ -3326,42 +3469,32 @@ namespace QQCacheTray
     {
         public static Form Build()
         {
-            Form f = new Form();
-            f.Text = "QQ 缓存管家";
-            f.FormBorderStyle = FormBorderStyle.FixedDialog;
-            f.StartPosition = FormStartPosition.CenterScreen;
-            f.MaximizeBox = false;
-            f.MinimizeBox = false;
-            f.ShowInTaskbar = false;
-            f.AutoScaleMode = AutoScaleMode.None;
-            f.Font = new Font("Microsoft YaHei UI", 9F);
-            f.ClientSize = new Size(470, 172);
+            Form f = PromptLayout.NewForm("QQ 缓存管家", new Size(480, 180));
 
-            Label l = new Label();
-            l.Text = "当前配置不会常驻：开机只检查一次，未到期 90 秒后退出；\r\n" +
-                     "期间没有托盘图标，也不会按时间清理。\r\n\r\n" +
-                     "如需常驻，请勾选任一应用的「启用自动清理」和「开启定时自动清理」。";
-            l.SetBounds(16, 14, 438, 88);
+            string text = "当前配置不会常驻：开机只检查一次，未到期 90 秒后退出；\r\n" +
+                          "期间没有托盘图标，也不会按时间清理。\r\n\r\n" +
+                          "如需常驻，请勾选任一应用的「启用自动清理」和「开启定时自动清理」。";
+
+            Label l = PromptLayout.MakeLabel(f, text, 16, 14, PromptLayout.MaxTextWidth);
             f.Controls.Add(l);
 
-            Button change = new Button();
-            change.Text = "更改配置";
-            change.SetBounds(180, 122, 110, 32);
-            change.DialogResult = DialogResult.Cancel;
+            Button change = PromptLayout.MakeButton(f, "更改配置", DialogResult.Cancel);
+            Button save = PromptLayout.MakeButton(f, "我已知晓，保存配置", DialogResult.OK);
 
-            Button save = new Button();
-            save.Text = "我已知晓，保存配置";
-            save.SetBounds(302, 122, 150, 32);
-            save.DialogResult = DialogResult.OK;
+            int y = l.Bottom + 16;
+            int right = 16 + PromptLayout.MaxTextWidth;
+
+            save.Location = new Point(right - save.Width, y);
+            change.Location = new Point(save.Left - PromptLayout.Gap - change.Width, y);
 
             f.Controls.Add(change);
             f.Controls.Add(save);
             f.AcceptButton = save;
             f.CancelButton = change;
+            f.ClientSize = new Size(right + 16, y + save.Height + 16);
             return f;
         }
 
-        // true = 我已知晓，保存配置；false = 更改配置
         public static bool Ask()
         {
             using (Form f = Build()) return f.ShowDialog() == DialogResult.OK;
@@ -3373,38 +3506,29 @@ namespace QQCacheTray
     {
         public static Form Build(string app, DateTime at)
         {
-            Form f = new Form();
-            f.Text = "QQ 缓存管家";
-            f.FormBorderStyle = FormBorderStyle.FixedDialog;
-            f.StartPosition = FormStartPosition.CenterScreen;
-            f.MaximizeBox = false;
-            f.MinimizeBox = false;
-            f.ShowInTaskbar = false;
-            f.AutoScaleMode = AutoScaleMode.None;
-            f.Font = new Font("Microsoft YaHei UI", 9F);
-            f.ClientSize = new Size(440, 168);
+            Form f = PromptLayout.NewForm("QQ 缓存管家", new Size(460, 170));
 
-            Label l = new Label();
-            l.Text = app + " 设置的清理时间 " + at.ToString("HH:mm") + " 已经过去。\r\n\r\n" +
-                     "点「确定」暂不清理，回去重新设置时间；\r\n" +
-                     "点「立即清理」现在清理一次。";
-            l.SetBounds(16, 14, 408, 86);
+            string text = app + " 设置的清理时间 " + at.ToString("HH:mm") + " 已经过去。\r\n\r\n" +
+                          "点「确定」暂不清理，回去重新设置时间；\r\n" +
+                          "点「立即清理」现在清理一次。";
+
+            Label l = PromptLayout.MakeLabel(f, text, 16, 14, PromptLayout.MaxTextWidth);
             f.Controls.Add(l);
 
-            Button ok = new Button();
-            ok.Text = "确定";
-            ok.SetBounds(150, 118, 110, 32);
-            ok.DialogResult = DialogResult.Cancel;
+            Button ok = PromptLayout.MakeButton(f, "确定", DialogResult.Cancel);
+            Button clean = PromptLayout.MakeButton(f, "立即清理", DialogResult.OK);
 
-            Button clean = new Button();
-            clean.Text = "立即清理";
-            clean.SetBounds(272, 118, 150, 32);
-            clean.DialogResult = DialogResult.OK;
+            int y = l.Bottom + 16;
+            int right = 16 + PromptLayout.MaxTextWidth;
+
+            clean.Location = new Point(right - clean.Width, y);
+            ok.Location = new Point(clean.Left - PromptLayout.Gap - ok.Width, y);
 
             f.Controls.Add(ok);
             f.Controls.Add(clean);
             f.AcceptButton = clean;
             f.CancelButton = ok;
+            f.ClientSize = new Size(right + 16, y + clean.Height + 16);
             return f;
         }
 
@@ -3420,7 +3544,7 @@ namespace QQCacheTray
         private static Toast _current;
         private readonly System.Windows.Forms.Timer _close = new System.Windows.Forms.Timer();
 
-        private Toast(string text)
+        private Toast(string text, bool left)
         {
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual;
@@ -3438,7 +3562,9 @@ namespace QQCacheTray
             Controls.Add(lbl);
 
             Rectangle wa = Screen.PrimaryScreen.WorkingArea;
-            Location = new Point(wa.Right - Width - 12, wa.Bottom - Height - 12);
+            Location = left
+                ? new Point(wa.Left + 12, wa.Bottom - Height - 12)
+                : new Point(wa.Right - Width - 12, wa.Bottom - Height - 12);
 
             _close.Interval = 6000;
             _close.Tick += delegate { Close(); };
@@ -3473,6 +3599,11 @@ namespace QQCacheTray
 
         public static void ShowToast(string text)
         {
+            ShowToast(text, 6000, false);
+        }
+
+        public static void ShowToast(string text, int ms, bool left)
+        {
             try
             {
                 if (string.IsNullOrEmpty(text)) return;
@@ -3481,7 +3612,8 @@ namespace QQCacheTray
                     try { _current.Close(); } catch { }
                 }
 
-                Toast t = new Toast(text);
+                Toast t = new Toast(text, left);
+                if (ms > 0) t._close.Interval = ms;
                 _current = t;
                 t.Show();
             }
