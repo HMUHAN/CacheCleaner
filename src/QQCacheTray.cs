@@ -21,7 +21,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("QQ 缓存管家")]
 [assembly: System.Reflection.AssemblyDescription("定时清理 QQ 本地聊天缓存")]
-[assembly: System.Reflection.AssemblyVersion("1.3.2.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.3.0")]
 
 namespace QQCacheTray
 {
@@ -174,8 +174,8 @@ namespace QQCacheTray
 
             // 开机自启：两个应用都没开“定时自动清理”时，只检查一次日期，没到期就 90 秒后退出
             Config bootCfg = Config.Load();
-            bool needResident = (bootCfg.Enabled && (bootCfg.AutoCleanEnabled || bootCfg.LimitEnabled))
-                             || (bootCfg.WxEnabled && (bootCfg.WxAutoCleanEnabled || bootCfg.WxLimitEnabled));
+            bool needResident = (bootCfg.Enabled && bootCfg.ScheduleOn)
+                             || (bootCfg.WxEnabled && bootCfg.WxScheduleOn);
 
             if (bootMode && !needResident)
             {
@@ -248,6 +248,22 @@ namespace QQCacheTray
                 Logger.Log("开机检查：定时清理未开启，只检查是否到期");
 
                 bool did = false;
+
+                if (cfg.Enabled && cfg.LimitEnabled)
+                {
+                    Logger.Log("开机检查：QQ 容量上限");
+                    Cleaner.EnforceLimit(cfg, false, Logger.Log);
+                    did = true;
+                }
+
+                if (cfg.WxEnabled && cfg.WxLimitEnabled)
+                {
+                    Logger.Log("开机检查：微信容量上限");
+                    Cleaner.EnforceLimit(cfg, true, Logger.Log);
+                    did = true;
+                }
+
+                if (cfg.LimitEnabled || cfg.WxLimitEnabled) return 0;
 
                 if (Cleaner.IsDueNow(cfg))
                 {
@@ -503,12 +519,12 @@ namespace QQCacheTray
                               + " 七天=" + n2.ToString("MM-dd HH:mm")
                               + " 今天稍后=" + n3.ToString("MM-dd HH:mm"));
 
-                Config r1 = new Config(); r1.Enabled = true; r1.AutoCleanEnabled = false;
-                r1.WxEnabled = false; r1.WxAutoCleanEnabled = false;
-                Config r2 = new Config(); r2.Enabled = true; r2.AutoCleanEnabled = false;
-                r2.WxEnabled = true; r2.WxAutoCleanEnabled = true;
-                Config r3 = new Config(); r3.Enabled = false; r3.AutoCleanEnabled = true;
-                r3.WxEnabled = true; r3.WxAutoCleanEnabled = false;
+                Config r1 = new Config(); r1.Enabled = true; r1.ScheduleOn = false;
+                r1.WxEnabled = false; r1.WxScheduleOn = false;
+                Config r2 = new Config(); r2.Enabled = true; r2.ScheduleOn = false;
+                r2.WxEnabled = true; r2.WxScheduleOn = true;
+                Config r3 = new Config(); r3.Enabled = false; r3.ScheduleOn = true;
+                r3.WxEnabled = true; r3.WxScheduleOn = false;
                 bool rOk = !Cleaner.WillStayResident(r1) && Cleaner.WillStayResident(r2) && !Cleaner.WillStayResident(r3);
                 string sample = "{\"version\": \"1.2.3\", \"url\": \"https://example.com/a.exe\", \"notes\": \"测试\"}";
                 UpdateChecker.Info ui = UpdateChecker.Parse(sample);
@@ -539,7 +555,7 @@ namespace QQCacheTray
                 sb.AppendLine("配置往返测试: " + (ok ? "PASS" : "FAIL"));
                 sb.AppendLine("last-clean.json 内容: " + ReadJsonSafe());
 
-                using (Form d1 = BootModePrompt.Build())
+                using (Form d1 = BootModePrompt.Build("自检提示：当前配置不会常驻后台。"))
                 using (Form d2 = SchedulePrompt.Build("QQ", DateTime.Today.AddHours(3)))
                 {
                     bool dOk = true;
@@ -732,9 +748,11 @@ namespace QQCacheTray
         public bool WxEmoji = true;
 
         // 容量上限模式（与定时清理互斥）
+        public bool ScheduleOn = true;
         public bool LimitEnabled = false;
         public int LimitMB = 2048;
         public bool LimitDeleteAll = false;
+        public bool WxScheduleOn = true;
         public bool WxLimitEnabled = false;
         public int WxLimitMB = 2048;
         public bool WxLimitDeleteAll = false;
@@ -913,6 +931,8 @@ namespace QQCacheTray
                             case "wx_pic": c.WxPic = ParseBool(val, true); break;
                             case "wx_video": c.WxVideo = ParseBool(val, true); break;
                             case "wx_emoji": c.WxEmoji = ParseBool(val, true); break;
+                            case "schedule_on": c.ScheduleOn = ParseBool(val, true); break;
+                            case "wx_schedule_on": c.WxScheduleOn = ParseBool(val, true); break;
                             case "limit_enabled": c.LimitEnabled = ParseBool(val, false); break;
                             case "limit_mb": c.LimitMB = ParseInt(val, 2048); break;
                             case "limit_delete_all": c.LimitDeleteAll = ParseBool(val, false); break;
@@ -983,6 +1003,8 @@ namespace QQCacheTray
                 sb.AppendLine("wx_pic=" + (WxPic ? "1" : "0"));
                 sb.AppendLine("wx_video=" + (WxVideo ? "1" : "0"));
                 sb.AppendLine("wx_emoji=" + (WxEmoji ? "1" : "0"));
+                sb.AppendLine("schedule_on=" + (ScheduleOn ? "1" : "0"));
+                sb.AppendLine("wx_schedule_on=" + (WxScheduleOn ? "1" : "0"));
                 sb.AppendLine("limit_enabled=" + (LimitEnabled ? "1" : "0"));
                 sb.AppendLine("limit_mb=" + LimitMB);
                 sb.AppendLine("limit_delete_all=" + (LimitDeleteAll ? "1" : "0"));
@@ -1208,7 +1230,7 @@ namespace QQCacheTray
         // 保存后程序会不会常驻：任一应用“总开关 + 定时”同时开启
         public static bool WillStayResident(Config c)
         {
-            return (c.Enabled && c.AutoCleanEnabled) || (c.WxEnabled && c.WxAutoCleanEnabled);
+            return (c.Enabled && c.ScheduleOn) || (c.WxEnabled && c.WxScheduleOn);
         }
 
         public static bool IsDueNow(Config cfg)
@@ -2956,6 +2978,7 @@ namespace QQCacheTray
         {
             public bool IsWx;
             public CheckBox Enabled;
+            public FlatCheck ScheduleOn;
 
             public Button ModeTimed;
             public Button ModeLimit;
@@ -3186,14 +3209,17 @@ namespace QQCacheTray
             page.Controls.Add(p.Ring);
 
             Label legend1 = MakeLabel("● " + (isWx ? "微信" : "QQ") + "缓存", 52, 154, 130, 18);
+            legend1.Tag = "keepcolor";
             legend1.ForeColor = Color.FromArgb(139, 92, 246);
             page.Controls.Add(legend1);
 
             Label legend2 = MakeLabel("● 电脑已用空间", 176, 154, 140, 18);
+            legend2.Tag = "keepcolor";
             legend2.ForeColor = Color.FromArgb(196, 181, 253);
             page.Controls.Add(legend2);
 
             Label legend3 = MakeLabel("● 电脑可用空间", 306, 154, 130, 18);
+            legend3.Tag = "keepcolor";
             legend3.ForeColor = Color.FromArgb(200, 205, 215);
             page.Controls.Add(legend3);
 
@@ -3210,6 +3236,12 @@ namespace QQCacheTray
             p.ModeTimed = MakeSeg("定时清理", 8, 230, 100);
             p.ModeTimed.Click += delegate { p.LimitMode = false; UpdatePanel(p); SyncRing(p); };
             page.Controls.Add(p.ModeTimed);
+
+            p.ScheduleOn = new FlatCheck();
+            p.ScheduleOn.Text = "开启（不勾选：开机只检查一次后退出）";
+            p.ScheduleOn.SetBounds(214, 232, 234, 24);
+            p.ScheduleOn.CheckedChanged += delegate { UpdatePanel(p); };
+            page.Controls.Add(p.ScheduleOn);
 
             p.ModeLimit = MakeSeg("容量上限", 112, 230, 100);
             p.ModeLimit.Click += delegate { p.LimitMode = true; UpdatePanel(p); SyncRing(p); };
@@ -3392,6 +3424,7 @@ namespace QQCacheTray
             bool wx = p.IsWx;
 
             p.Enabled.Checked = wx ? c.WxEnabled : c.Enabled;
+            p.ScheduleOn.Checked = wx ? c.WxScheduleOn : c.ScheduleOn;
             p.LimitMode = wx ? c.WxLimitEnabled : c.LimitEnabled;
 
             p.Hour.Value = Clamp(wx ? c.WxCleanHour : c.CleanHour, 0, 23);
@@ -3427,8 +3460,9 @@ namespace QQCacheTray
             if (wx)
             {
                 c.WxEnabled = p.Enabled.Checked;
+                c.WxScheduleOn = p.Enabled.Checked && p.ScheduleOn.Checked;
                 c.WxLimitEnabled = limit;
-                c.WxAutoCleanEnabled = p.Enabled.Checked && !limit;
+                c.WxAutoCleanEnabled = p.Enabled.Checked && p.ScheduleOn.Checked && !limit;
                 c.WxCleanHour = (int)p.Hour.Value;
                 c.WxCleanMinute = (int)p.Minute.Value;
                 c.WxIntervalDays = (int)p.Interval.Value;
@@ -3444,8 +3478,9 @@ namespace QQCacheTray
             else
             {
                 c.Enabled = p.Enabled.Checked;
+                c.ScheduleOn = p.Enabled.Checked && p.ScheduleOn.Checked;
                 c.LimitEnabled = limit;
-                c.AutoCleanEnabled = p.Enabled.Checked && !limit;
+                c.AutoCleanEnabled = p.Enabled.Checked && p.ScheduleOn.Checked && !limit;
                 c.CleanHour = (int)p.Hour.Value;
                 c.CleanMinute = (int)p.Minute.Value;
                 c.IntervalDays = (int)p.Interval.Value;
@@ -3467,6 +3502,7 @@ namespace QQCacheTray
         {
             bool on = p.Enabled.Checked;
             p.ModeTimed.Enabled = on;
+            p.ScheduleOn.Enabled = on;
             p.ModeLimit.Enabled = on;
             p.Keep.Enabled = true;
             p.CleanNow.Enabled = true;
@@ -3758,6 +3794,7 @@ namespace QQCacheTray
 
             if (c is Label || c is CheckBox)
             {
+                if (c.Tag != null && (string)c.Tag == "keepcolor") return;
                 c.ForeColor = dark ? DarkText : Color.Black;
                 c.BackColor = Color.Transparent;
                 return;
@@ -3862,17 +3899,26 @@ namespace QQCacheTray
             // 两个应用都没有“总开关 + 定时”同时开启 → 开机只会检查一次然后退出
             bool willResident = Cleaner.WillStayResident(c);
 
-            if (!willResident && !BootModePrompt.Ask())
-            {
-                return;   // 选了“更改配置”
-            }
+            bool resQq = c.Enabled && c.ScheduleOn;
+            bool resWx = c.WxEnabled && c.WxScheduleOn;
+            bool offQq = c.Enabled && !c.ScheduleOn;
+            bool offWx = c.WxEnabled && !c.WxScheduleOn;
+            string nl = Environment.NewLine;
+            PromptLayout.SetDark(_dark);
 
-            string autoMsg;
-            bool autoOk = AutoStart.Set(_chkAutoStart.Checked, out autoMsg);
-            if (!autoOk && !string.IsNullOrEmpty(autoMsg))
+            if (!resQq && !resWx)
             {
-                MessageBox.Show("开机自启设置未完全成功：\n\n" + autoMsg,
-                    "QQ 缓存管家", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                string m1 = "QQ 和微信都没有勾选「开启」：开机只检查一次，检查完 90 秒后自动退出，不会常驻。" + nl +
+                            "如需常驻，请勾选对应应用的「开启」。";
+                if (!BootModePrompt.Ask(m1)) return;
+            }
+            else if (offQq || offWx)
+            {
+                string alive = (resQq && resWx) ? "QQ 和微信" : (resQq ? "QQ" : "微信");
+                string idle = (offQq && offWx) ? "QQ 和微信" : (offQq ? "QQ" : "微信");
+                string m2 = idle + " 没有勾选「开启」：开机检查后 90 秒自动退出，不会常驻后台。" + nl +
+                            alive + " 会正常常驻。";
+                if (!BootModePrompt.Ask(m2)) return;
             }
 
             Result = c;
@@ -4602,6 +4648,28 @@ namespace QQCacheTray
     // 提示框排版：按字体实测尺寸，避免高 DPI 下按钮空白 / 文字被裁
     internal static class PromptLayout
     {
+        private static bool? _darkCache;
+        private static bool? _forced;
+
+        public static void SetDark(bool dark) { _forced = dark; }
+
+        public static bool Dark
+        {
+            get
+            {
+                if (_forced != null) return _forced.Value;
+                if (_darkCache == null)
+                {
+                    try { _darkCache = Config.Load().DarkMode; }
+                    catch { _darkCache = false; }
+                }
+                return _darkCache.Value;
+            }
+        }
+
+        public static Color Bg { get { return Dark ? Color.FromArgb(24, 24, 27) : SystemColors.Control; } }
+        public static Color Text { get { return Dark ? Color.FromArgb(232, 223, 200) : Color.Black; } }
+
         public const int Pad = 16;
         public const int Gap = 10;
         public const int MaxTextWidth = 440;
@@ -4618,6 +4686,8 @@ namespace QQCacheTray
             f.AutoScaleMode = AutoScaleMode.None;
             f.Font = SystemFonts.MessageBoxFont;
             f.ClientSize = client;
+            f.BackColor = Bg;
+            f.ForeColor = Text;
             return f;
         }
 
@@ -4627,6 +4697,8 @@ namespace QQCacheTray
             l.Font = f.Font;
             l.Text = text;
             l.AutoSize = false;
+            l.ForeColor = Text;
+            l.BackColor = Color.Transparent;
 
             Size need = TextRenderer.MeasureText(text, f.Font, new Size(width, 4000),
                 TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
@@ -4642,6 +4714,13 @@ namespace QQCacheTray
             b.Text = text;
             b.DialogResult = result;
             b.AutoSize = false;
+            if (Dark)
+            {
+                b.FlatStyle = FlatStyle.Flat;
+                b.BackColor = Color.FromArgb(38, 38, 44);
+                b.ForeColor = Text;
+                b.FlatAppearance.BorderColor = Color.FromArgb(72, 72, 80);
+            }
 
             Size need = TextRenderer.MeasureText(text, f.Font);
             b.Size = new Size(Math.Max(96, need.Width + 36), Math.Max(30, need.Height + 14));
@@ -4652,15 +4731,10 @@ namespace QQCacheTray
     // 保存前的“开机只检查一次、90 秒后退出”提示
     internal static class BootModePrompt
     {
-        public static Form Build()
+        public static Form Build(string message)
         {
             Form f = PromptLayout.NewForm("QQ 缓存管家", new Size(480, 180));
-
-            string text = "当前配置不会常驻：开机只检查一次，未到期 90 秒后退出；\r\n" +
-                          "期间没有托盘图标，也不会按时间清理。\r\n\r\n" +
-                          "如需常驻，请勾选任一应用的「启用自动清理」和「开启定时自动清理」。";
-
-            Label l = PromptLayout.MakeLabel(f, text, 16, 14, PromptLayout.MaxTextWidth);
+            Label l = PromptLayout.MakeLabel(f, message, 16, 14, PromptLayout.MaxTextWidth);
             f.Controls.Add(l);
 
             Button change = PromptLayout.MakeButton(f, "更改配置", DialogResult.Cancel);
@@ -4680,13 +4754,12 @@ namespace QQCacheTray
             return f;
         }
 
-        public static bool Ask()
+        public static bool Ask(string message)
         {
-            using (Form f = Build()) return f.ShowDialog() == DialogResult.OK;
+            using (Form f = Build(message)) return f.ShowDialog() == DialogResult.OK;
         }
     }
 
-    // “设置的时间已经过去”的提示
     internal static class SchedulePrompt
     {
         public static Form Build(string app, DateTime at)
