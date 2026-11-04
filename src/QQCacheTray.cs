@@ -21,7 +21,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("QQ 缓存管家")]
 [assembly: System.Reflection.AssemblyDescription("定时清理 QQ 本地聊天缓存")]
-[assembly: System.Reflection.AssemblyVersion("1.3.1.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.2.0")]
 
 namespace QQCacheTray
 {
@@ -2771,6 +2771,162 @@ namespace QQCacheTray
         }
     }
 
+    // 自绘数字框：系统 NumericUpDown 的上下箭头是白色主题色，改不掉，只能自己画
+    internal sealed class FlatSpinner : Control
+    {
+        public decimal Minimum;
+        public decimal Maximum = 100;
+        public decimal Increment = 1;
+        public bool Dark;
+
+        private decimal _value;
+        private TextBox _edit;
+        private Rectangle _upRect;
+        private Rectangle _downRect;
+        private const int BtnW = 16;
+
+        public decimal Value
+        {
+            get { return _value; }
+            set
+            {
+                decimal v = value;
+                if (v < Minimum) v = Minimum;
+                if (v > Maximum) v = Maximum;
+
+                bool changed = v != _value;
+                _value = v;
+
+                if (_edit != null)
+                {
+                    string text = ((long)v).ToString();
+                    if (_edit.Text != text) _edit.Text = text;
+                }
+
+                if (changed) Invalidate();
+            }
+        }
+
+        public FlatSpinner()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            Height = 24;
+
+            _edit = new TextBox();
+            _edit.BorderStyle = BorderStyle.None;
+            _edit.TextAlign = HorizontalAlignment.Right;
+            _edit.TextChanged += delegate { ParseEdit(); };
+            Controls.Add(_edit);
+        }
+
+        private void ParseEdit()
+        {
+            if (_edit == null) return;
+            decimal v;
+            if (decimal.TryParse(_edit.Text.Trim(), out v)) Value = v;
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            if (_edit != null) _edit.SetBounds(4, Math.Max(1, (Height - 17) / 2), Math.Max(10, Width - BtnW - 8), 17);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (_upRect.Contains(e.Location)) { Value = Value + Increment; }
+            else if (_downRect.Contains(e.Location)) { Value = Value - Increment; }
+        }
+
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            base.OnMouseWheel(e);
+            Value = Value + (e.Delta > 0 ? Increment : -Increment);
+        }
+
+        private static void DrawArrow(Graphics g, Rectangle r, bool up, Color color)
+        {
+            int cx = r.Left + r.Width / 2;
+            int cy = r.Top + r.Height / 2;
+            Point[] pts = up
+                ? new Point[] { new Point(cx - 4, cy + 2), new Point(cx + 4, cy + 2), new Point(cx, cy - 3) }
+                : new Point[] { new Point(cx - 4, cy - 2), new Point(cx + 4, cy - 2), new Point(cx, cy + 3) };
+            using (Brush b = new SolidBrush(color)) g.FillPolygon(b, pts);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            Color bg = Dark ? Color.FromArgb(34, 34, 38) : Color.White;
+            Color border = Dark ? Color.FromArgb(72, 72, 80) : Color.FromArgb(200, 205, 215);
+            Color arrow = Dark ? Color.FromArgb(176, 176, 186) : Color.FromArgb(90, 95, 105);
+            Color text = Dark ? Color.FromArgb(232, 223, 200) : Color.Black;
+
+            using (Brush b = new SolidBrush(bg)) g.FillRectangle(b, ClientRectangle);
+            using (Pen p = new Pen(border)) g.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
+
+            int half = Height / 2;
+            _upRect = new Rectangle(Width - BtnW, 1, BtnW - 1, half - 1);
+            _downRect = new Rectangle(Width - BtnW, half, BtnW - 1, Height - half - 2);
+
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            DrawArrow(g, _upRect, true, arrow);
+            DrawArrow(g, _downRect, false, arrow);
+
+            if (_edit != null)
+            {
+                _edit.BackColor = bg;
+                _edit.ForeColor = text;
+            }
+        }
+    }
+
+    // 自绘复选框：系统默认的白框在深色下太刺眼
+    internal sealed class FlatCheck : CheckBox
+    {
+        public bool Dark;
+
+        public FlatCheck()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.OptimizedDoubleBuffer, true);
+            BackColor = Color.Transparent;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.Clear(Parent != null ? Parent.BackColor : BackColor);
+
+            int box = 14;
+            int y = (Height - box) / 2;
+            Rectangle r = new Rectangle(1, y, box, box);
+
+            Color fill = Dark ? Color.FromArgb(44, 44, 50) : Color.White;
+            Color border = Dark ? Color.FromArgb(96, 96, 106) : Color.FromArgb(150, 155, 165);
+            Color tick = Dark ? Color.FromArgb(196, 181, 253) : Color.FromArgb(109, 68, 220);
+            Color text = Dark ? Color.FromArgb(232, 223, 200) : Color.Black;
+
+            using (Brush b = new SolidBrush(fill)) g.FillRectangle(b, r);
+            using (Pen p = new Pen(border)) g.DrawRectangle(p, r);
+
+            if (Checked)
+            {
+                using (Pen p = new Pen(tick, 2))
+                {
+                    g.DrawLine(p, r.Left + 3, r.Top + 7, r.Left + 6, r.Top + 11);
+                    g.DrawLine(p, r.Left + 6, r.Top + 11, r.Left + 12, r.Top + 3);
+                }
+            }
+
+            TextRenderer.DrawText(g, Text, Font,
+                new Rectangle(box + 6, 0, Width - box - 6, Height), text,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        }
+    }
+
     internal sealed class SettingsForm : Form
     {
         private readonly Config _cfg;
@@ -2780,6 +2936,13 @@ namespace QQCacheTray
 
         private AppPanel _qq;
         private AppPanel _wx;
+
+        private Panel _tabHost;
+        private Panel _pageWx;
+        private Panel _pageQq;
+        private Button _tabWx;
+        private Button _tabQq;
+        private int _tabIndex;
 
         private CheckBox _chkAutoStart;
         private CheckBox _chkDark;
@@ -2798,13 +2961,14 @@ namespace QQCacheTray
             public Button ModeLimit;
             public bool LimitMode;
 
-            public DateTimePicker Time;
-            public NumericUpDown Interval;
-            public NumericUpDown LimitMB;
+            public FlatSpinner Hour;
+            public FlatSpinner Minute;
+            public FlatSpinner Interval;
+            public FlatSpinner LimitMB;
             public Button ActOld;
             public Button ActAll;
             public bool DeleteAll;
-            public NumericUpDown Keep;
+            public FlatSpinner Keep;
 
             public TextBox Root;
             public Label Detect;
@@ -2823,11 +2987,14 @@ namespace QQCacheTray
             public Button Rescan;
 
             public Donut Ring;
-            public Label LblEvery;   // “每隔”
-            public Label LblDays;    // “天  每次”
-            public Label LblClean;   // “清理”
-            public Label LblLimit;   // “上限”
-            public Label LblMB;      // “MB”
+
+            public Label LblEvery;
+            public Label LblDays;
+            public Label LblClean;
+            public Label LblHour;
+            public Label LblMin;
+            public Label LblLimit;
+            public Label LblMB;
         }
 
         public SettingsForm(Config cfg)
@@ -2894,43 +3061,39 @@ namespace QQCacheTray
             ShowInTaskbar = true;
             BackColor = Color.FromArgb(246, 247, 250);
 
-            TabControl tabs = new TabControl();
-            tabs.SetBounds(12, 10, 446, 530);
-            tabs.Font = new Font("Microsoft YaHei UI", 9F);
-            tabs.DrawMode = TabDrawMode.OwnerDrawFixed;
-            tabs.DrawItem += delegate(object snd, DrawItemEventArgs de)
-            {
-                TabControl tc = (TabControl)snd;
-                Rectangle r = tc.GetTabRect(de.Index);
-                bool sel = de.Index == tc.SelectedIndex;
-                Color bg = _dark ? (sel ? Color.FromArgb(45, 45, 50) : Color.FromArgb(30, 30, 34))
-                                 : (sel ? Color.White : Color.FromArgb(235, 236, 240));
-                using (Brush b = new SolidBrush(bg)) de.Graphics.FillRectangle(b, r);
-                TextRenderer.DrawText(de.Graphics, tc.TabPages[de.Index].Text, tc.Font, r,
-                    _dark ? DarkText : Color.Black,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-            };
-            Controls.Add(tabs);
+            // 自绘的标签切换栏（不用 TabControl，避免系统绘制的浅色边框）
+            _tabWx = MakeSeg("微信", 12, 8, 100);
+            _tabWx.Click += delegate { SelectTab(0); };
+            Controls.Add(_tabWx);
 
-            TabPage pageWx = new TabPage("微信");
-            pageWx.BackColor = Color.White;
-            tabs.TabPages.Add(pageWx);
+            _tabQq = MakeSeg("QQ", 118, 8, 100);
+            _tabQq.Click += delegate { SelectTab(1); };
+            Controls.Add(_tabQq);
 
-            TabPage pageQq = new TabPage("QQ");
-            pageQq.BackColor = Color.White;
-            tabs.TabPages.Add(pageQq);
+            _tabHost = new Panel();
+            _tabHost.SetBounds(12, 40, 446, 502);
+            _tabHost.BackColor = Color.White;
+            Controls.Add(_tabHost);
 
-            _wx = BuildPage(pageWx, true);
-            _qq = BuildPage(pageQq, false);
+            _pageWx = new Panel();
+            _pageWx.SetBounds(0, 0, 446, 502);
+            _pageWx.BackColor = Color.White;
+            _tabHost.Controls.Add(_pageWx);
 
-            if (Program.SettingsTab == 1) tabs.SelectedIndex = 1;
+            _pageQq = new Panel();
+            _pageQq.SetBounds(0, 0, 446, 502);
+            _pageQq.BackColor = Color.White;
+            _tabHost.Controls.Add(_pageQq);
 
-            _chkAutoStart = new CheckBox();
+            _wx = BuildPage(_pageWx, true);
+            _qq = BuildPage(_pageQq, false);
+
+            _chkAutoStart = new FlatCheck();
             _chkAutoStart.Text = "开机自动启动（登录时请求管理员权限）";
             _chkAutoStart.SetBounds(18, 548, 300, 24);
             Controls.Add(_chkAutoStart);
 
-            _chkDark = new CheckBox();
+            _chkDark = new FlatCheck();
             _chkDark.Text = "黑夜模式";
             _chkDark.SetBounds(330, 548, 110, 24);
             _chkDark.CheckedChanged += delegate { ApplyTheme(_chkDark.Checked); };
@@ -2965,6 +3128,30 @@ namespace QQCacheTray
 
             AcceptButton = btnSave;
             CancelButton = btnCancel;
+
+            SelectTab(Program.SettingsTab);
+        }
+
+        private void SelectTab(int idx)
+        {
+            _tabIndex = idx;
+            if (_pageWx == null) return;
+
+            _pageWx.Visible = idx == 0;
+            _pageQq.Visible = idx == 1;
+
+            StyleTab(_tabWx, idx == 0);
+            StyleTab(_tabQq, idx == 1);
+        }
+
+        private void StyleTab(Button b, bool active)
+        {
+            if (b == null) return;
+            b.FlatStyle = FlatStyle.Flat;
+            b.FlatAppearance.BorderSize = 0;
+            b.BackColor = active ? Color.FromArgb(139, 92, 246)
+                                 : (_dark ? DarkPanel : Color.FromArgb(240, 241, 245));
+            b.ForeColor = active ? Color.White : (_dark ? DarkText : Color.Black);
         }
 
         private static Label MakeLabel(string text, int x, int y, int w, int h)
@@ -2987,13 +3174,12 @@ namespace QQCacheTray
             return b;
         }
 
-        private AppPanel BuildPage(TabPage page, bool isWx)
+        private AppPanel BuildPage(Control page, bool isWx)
         {
             AppPanel p = new AppPanel();
             p.IsWx = isWx;
             page.BackColor = Color.White;
 
-            // ---- 顶部：环形图 ----
             p.Ring = new Donut();
             p.Ring.SetBounds(8, 4, 430, 150);
             p.Ring.Accent = Color.FromArgb(139, 92, 246);
@@ -3011,12 +3197,11 @@ namespace QQCacheTray
             legend3.ForeColor = Color.FromArgb(200, 205, 215);
             page.Controls.Add(legend3);
 
-            // ---- 配置 ----
             Label cfgTitle = MakeLabel("配置", 8, 178, 100, 22);
             cfgTitle.Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold);
             page.Controls.Add(cfgTitle);
 
-            p.Enabled = new CheckBox();
+            p.Enabled = new FlatCheck();
             p.Enabled.Text = "启用自动清理";
             p.Enabled.SetBounds(6, 202, 220, 24);
             p.Enabled.CheckedChanged += delegate { UpdatePanel(p); };
@@ -3030,49 +3215,53 @@ namespace QQCacheTray
             p.ModeLimit.Click += delegate { p.LimitMode = true; UpdatePanel(p); SyncRing(p); };
             page.Controls.Add(p.ModeLimit);
 
-            // 定时模式两行
-            p.Time = new DateTimePicker();
-            p.Time.Format = DateTimePickerFormat.Custom;
-            p.Time.CustomFormat = "HH:mm";
-            p.Time.ShowUpDown = true;
-            p.Time.SetBounds(204, 266, 74, 24);
-            page.Controls.Add(p.Time);
+            // ---- 定时行：每隔 N 天    每次 HH 时 MM 分 清理 ----
+            p.LblEvery = MakeLabel("每隔", 8, 268, 36, 22);
+            page.Controls.Add(p.LblEvery);
 
-            Label lEvery = MakeLabel("每隔", 8, 268, 36, 22);
-            page.Controls.Add(lEvery);
-            p.LblEvery = lEvery;
-
-            p.Interval = new NumericUpDown();
+            p.Interval = new FlatSpinner();
             p.Interval.Minimum = 0;
             p.Interval.Maximum = 90;
             p.Interval.SetBounds(44, 266, 54, 24);
             page.Controls.Add(p.Interval);
 
-            Label lDay = MakeLabel("天  每次", 100, 268, 40, 22);
-            lDay.AutoSize = false;
-            lDay.SetBounds(100, 268, 100, 22);
-            page.Controls.Add(lDay);
-            p.LblDays = lDay;
+            p.LblDays = MakeLabel("天    每次", 102, 268, 66, 22);
+            page.Controls.Add(p.LblDays);
 
-            Label lClean = MakeLabel("清理", 282, 268, 40, 22);
-            page.Controls.Add(lClean);
-            p.LblClean = lClean;
+            p.Hour = new FlatSpinner();
+            p.Hour.Minimum = 0;
+            p.Hour.Maximum = 23;
+            p.Hour.SetBounds(168, 266, 46, 24);
+            page.Controls.Add(p.Hour);
 
-            // 上限模式两行
-            p.LimitMB = new NumericUpDown();
+            p.LblHour = MakeLabel("时", 218, 268, 18, 22);
+            page.Controls.Add(p.LblHour);
+
+            p.Minute = new FlatSpinner();
+            p.Minute.Minimum = 0;
+            p.Minute.Maximum = 59;
+            p.Minute.SetBounds(240, 266, 46, 24);
+            page.Controls.Add(p.Minute);
+
+            p.LblMin = MakeLabel("分", 290, 268, 18, 22);
+            page.Controls.Add(p.LblMin);
+
+            p.LblClean = MakeLabel("清理", 316, 268, 40, 22);
+            page.Controls.Add(p.LblClean);
+
+            // ---- 上限行：文件到达 N MB 时 [删除旧文件][删除全部] ----
+            p.LblLimit = MakeLabel("文件到达", 8, 268, 64, 22);
+            page.Controls.Add(p.LblLimit);
+
+            p.LimitMB = new FlatSpinner();
             p.LimitMB.Minimum = 100;
             p.LimitMB.Maximum = 200000;
             p.LimitMB.Increment = 256;
             p.LimitMB.SetBounds(74, 266, 70, 24);
             page.Controls.Add(p.LimitMB);
 
-            Label lLimit = MakeLabel("文件到达", 8, 268, 64, 22);
-            page.Controls.Add(lLimit);
-            p.LblLimit = lLimit;
-
-            Label lMB = MakeLabel("MB 时", 148, 268, 46, 22);
-            page.Controls.Add(lMB);
-            p.LblMB = lMB;
+            p.LblMB = MakeLabel("MB 时", 148, 268, 46, 22);
+            page.Controls.Add(p.LblMB);
 
             p.ActOld = MakeSeg("删除旧文件", 196, 264, 100);
             p.ActOld.Click += delegate { p.DeleteAll = false; UpdatePanel(p); };
@@ -3082,17 +3271,19 @@ namespace QQCacheTray
             p.ActAll.Click += delegate { p.DeleteAll = true; UpdatePanel(p); };
             page.Controls.Add(p.ActAll);
 
-            // 保留
+            // ---- 保留 / 目录 ----
             page.Controls.Add(MakeLabel("保留最近", 8, 300, 70, 22));
-            p.Keep = new NumericUpDown();
+
+            p.Keep = new FlatSpinner();
             p.Keep.Minimum = 0;
             p.Keep.Maximum = 365;
             p.Keep.SetBounds(80, 298, 54, 24);
             page.Controls.Add(p.Keep);
+
             page.Controls.Add(MakeLabel("天（0 = 只留当天）", 140, 300, 200, 22));
 
-            // 目录
             page.Controls.Add(MakeLabel("目录", 8, 332, 36, 22));
+
             p.Root = new TextBox();
             p.Root.SetBounds(44, 330, 282, 24);
             page.Controls.Add(p.Root);
@@ -3109,12 +3300,18 @@ namespace QQCacheTray
             p.Detect.ForeColor = Color.Gray;
             page.Controls.Add(p.Detect);
 
-            // 清理内容
+            // ---- 清理内容 ----
             page.Controls.Add(MakeLabel("清理内容", 8, 382, 70, 22));
-            p.Pic = MakeCheck("图片", 84, 380); p.Pic.SetBounds(84, 380, 70, 22);
-            p.Video = MakeCheck("视频", 160, 380); p.Video.SetBounds(160, 380, 70, 22);
-            p.Emoji = MakeCheck("表情", 236, 380); p.Emoji.SetBounds(236, 380, 70, 22);
-            p.Voice = MakeCheck("语音", 312, 380); p.Voice.SetBounds(312, 380, 70, 22);
+
+            p.Pic = MakeCheck("图片", 84, 380);
+            p.Pic.SetBounds(84, 380, 70, 22);
+            p.Video = MakeCheck("视频", 160, 380);
+            p.Video.SetBounds(160, 380, 70, 22);
+            p.Emoji = MakeCheck("表情", 236, 380);
+            p.Emoji.SetBounds(236, 380, 70, 22);
+            p.Voice = MakeCheck("语音", 312, 380);
+            p.Voice.SetBounds(312, 380, 70, 22);
+
             page.Controls.Add(p.Pic);
             page.Controls.Add(p.Video);
             page.Controls.Add(p.Emoji);
@@ -3130,7 +3327,7 @@ namespace QQCacheTray
                 page.Controls.Add(p.PersonalEmoji);
             }
 
-            // 状态
+            // ---- 状态 ----
             p.Last = MakeLabel("上次清理：从未清理", 8, 426, 300, 18);
             page.Controls.Add(p.Last);
 
@@ -3157,24 +3354,13 @@ namespace QQCacheTray
 
         private CheckBox MakeCheck(string text, int x, int y)
         {
-            CheckBox c = new CheckBox();
+            CheckBox c = new FlatCheck();
             c.Text = text;
             c.SetBounds(x, y, 180, 22);
             return c;
         }
 
-        private static DateTime SafeDate(DateTime dt)
-        {
-            if (dt < new DateTime(1900, 1, 1)) dt = DateTime.Today.AddHours(3);
-            if (dt > new DateTime(2999, 1, 1)) dt = DateTime.Today.AddHours(3);
-            return dt;
-        }
 
-        private static DateTime TimeValue(int h, int m)
-        {
-            return DateTime.Today.AddHours(Math.Max(0, Math.Min(23, h)))
-                                 .AddMinutes(Math.Max(0, Math.Min(59, m)));
-        }
 
         private static decimal Clamp(int v, int lo, int hi)
         {
@@ -3184,7 +3370,10 @@ namespace QQCacheTray
         private void SyncRing(AppPanel p)
         {
             p.Interval.Visible = !p.LimitMode;
-            p.Time.Visible = !p.LimitMode;
+            p.Hour.Visible = !p.LimitMode;
+            p.Minute.Visible = !p.LimitMode;
+            if (p.LblHour != null) p.LblHour.Visible = !p.LimitMode;
+            if (p.LblMin != null) p.LblMin.Visible = !p.LimitMode;
             if (p.LblEvery != null) p.LblEvery.Visible = !p.LimitMode;
             if (p.LblDays != null) p.LblDays.Visible = !p.LimitMode;
             if (p.LblClean != null) p.LblClean.Visible = !p.LimitMode;
@@ -3205,8 +3394,8 @@ namespace QQCacheTray
             p.Enabled.Checked = wx ? c.WxEnabled : c.Enabled;
             p.LimitMode = wx ? c.WxLimitEnabled : c.LimitEnabled;
 
-            p.Time.Value = SafeDate(TimeValue(wx ? c.WxCleanHour : c.CleanHour,
-                                              wx ? c.WxCleanMinute : c.CleanMinute));
+            p.Hour.Value = Clamp(wx ? c.WxCleanHour : c.CleanHour, 0, 23);
+            p.Minute.Value = Clamp(wx ? c.WxCleanMinute : c.CleanMinute, 0, 59);
             p.Interval.Value = Clamp(wx ? c.WxIntervalDays : c.IntervalDays, 0, 90);
             p.LimitMB.Value = Clamp(wx ? c.WxLimitMB : c.LimitMB, 100, 200000);
             p.DeleteAll = wx ? c.WxLimitDeleteAll : c.LimitDeleteAll;
@@ -3240,8 +3429,8 @@ namespace QQCacheTray
                 c.WxEnabled = p.Enabled.Checked;
                 c.WxLimitEnabled = limit;
                 c.WxAutoCleanEnabled = p.Enabled.Checked && !limit;
-                c.WxCleanHour = p.Time.Value.Hour;
-                c.WxCleanMinute = p.Time.Value.Minute;
+                c.WxCleanHour = (int)p.Hour.Value;
+                c.WxCleanMinute = (int)p.Minute.Value;
                 c.WxIntervalDays = (int)p.Interval.Value;
                 c.WxLimitMB = (int)p.LimitMB.Value;
                 c.WxLimitDeleteAll = p.DeleteAll;
@@ -3257,8 +3446,8 @@ namespace QQCacheTray
                 c.Enabled = p.Enabled.Checked;
                 c.LimitEnabled = limit;
                 c.AutoCleanEnabled = p.Enabled.Checked && !limit;
-                c.CleanHour = p.Time.Value.Hour;
-                c.CleanMinute = p.Time.Value.Minute;
+                c.CleanHour = (int)p.Hour.Value;
+                c.CleanMinute = (int)p.Minute.Value;
                 c.IntervalDays = (int)p.Interval.Value;
                 c.LimitMB = (int)p.LimitMB.Value;
                 c.LimitDeleteAll = p.DeleteAll;
@@ -3301,7 +3490,8 @@ namespace QQCacheTray
 
             bool timedOn = on && !p.LimitMode;
             bool limitOn = on && p.LimitMode;
-            p.Time.Enabled = timedOn;
+            p.Hour.Enabled = timedOn;
+            p.Minute.Enabled = timedOn;
             p.Interval.Enabled = timedOn;
             p.LimitMB.Enabled = limitOn;
             p.ActOld.Enabled = limitOn;
@@ -3503,6 +3693,7 @@ namespace QQCacheTray
             foreach (AppPanel p in new AppPanel[] { _wx, _qq })
                 if (p != null) UpdatePanel(p);
 
+            SelectTab(_tabIndex);
             BackColor = dark ? DarkBg : Color.FromArgb(246, 247, 250);
             Invalidate(true);
         }
@@ -3511,6 +3702,22 @@ namespace QQCacheTray
         {
             if (c == null) return;
             if (ReferenceEquals(c, _updateBar)) return;   // 更新条固定绿色
+            if (ReferenceEquals(c, _tabWx) || ReferenceEquals(c, _tabQq)) return;   // 切换按钮单独上色
+
+            if (c is FlatSpinner)
+            {
+                ((FlatSpinner)c).Dark = dark;
+                c.Invalidate();
+                return;   // 内部 TextBox 由控件自己管，不要再递归改它
+            }
+
+            if (c is FlatCheck)
+            {
+                ((FlatCheck)c).Dark = dark;
+                c.Invalidate();
+                return;
+            }
+
             foreach (Control child in c.Controls) ApplyTo(child, dark);
 
             if (c is Donut)
@@ -3520,9 +3727,32 @@ namespace QQCacheTray
                 return;
             }
 
+            if (c is TabControl)
+            {
+                c.BackColor = dark ? DarkBg : Color.FromArgb(235, 236, 240);   // 页面四周露出的就是它的底色
+                return;
+            }
+
             if (c is TabPage || c is Panel)
             {
                 c.BackColor = dark ? DarkBg : Color.White;
+                return;
+            }
+
+            if (c is FlatSpinner)
+            {
+                ((FlatSpinner)c).Dark = dark;
+                c.Invalidate();
+                return;
+            }
+
+            if (c is FlatCheck)
+            {
+                FlatCheck fc = (FlatCheck)c;
+                fc.Dark = dark;
+                fc.ForeColor = dark ? DarkText : Color.Black;
+                fc.BackColor = Color.Transparent;
+                fc.Invalidate();
                 return;
             }
 
@@ -3543,7 +3773,26 @@ namespace QQCacheTray
                 return;
             }
 
-            if (c is TextBox || c is NumericUpDown || c is DateTimePicker)
+            if (c is TextBox)
+            {
+                TextBox tb = (TextBox)c;
+                tb.BorderStyle = dark ? BorderStyle.None : BorderStyle.Fixed3D;
+                tb.BackColor = dark ? DarkPanel : Color.White;
+                tb.ForeColor = dark ? DarkText : Color.Black;
+                return;
+            }
+
+            if (c is NumericUpDown)
+            {
+                NumericUpDown nu = (NumericUpDown)c;
+                nu.BorderStyle = dark ? BorderStyle.None : BorderStyle.Fixed3D;
+
+                nu.BackColor = dark ? DarkPanel : Color.White;
+                nu.ForeColor = dark ? DarkText : Color.Black;
+                return;
+            }
+
+            if (c is DateTimePicker)
             {
                 c.BackColor = dark ? DarkPanel : Color.White;
                 c.ForeColor = dark ? DarkText : Color.Black;
@@ -3577,14 +3826,16 @@ namespace QQCacheTray
             // 只有“0 天 = 当天清理”时，时:分过了才有意义；N≥1 时到期日在未来，不打扰
             TimeSpan nowTime = DateTime.Now.TimeOfDay;
             bool pastQq = c.Enabled && c.AutoCleanEnabled && c.IntervalDays == 0 &&
-                          nowTime >= new TimeSpan(_qq.Time.Value.Hour, _qq.Time.Value.Minute, 0);
+                          nowTime >= new TimeSpan((int)_qq.Hour.Value, (int)_qq.Minute.Value, 0);
             bool pastWx = c.WxEnabled && c.WxAutoCleanEnabled && c.WxIntervalDays == 0 &&
-                          nowTime >= new TimeSpan(_wx.Time.Value.Hour, _wx.Time.Value.Minute, 0);
+                          nowTime >= new TimeSpan((int)_wx.Hour.Value, (int)_wx.Minute.Value, 0);
 
             if (pastQq || pastWx)
             {
                 string which = pastQq && pastWx ? "QQ 和微信" : (pastQq ? "QQ" : "微信");
-                DateTime at = DateTime.Today.Add(pastQq ? _qq.Time.Value.TimeOfDay : _wx.Time.Value.TimeOfDay);
+                DateTime at = DateTime.Today.Add(pastQq
+                    ? new TimeSpan((int)_qq.Hour.Value, (int)_qq.Minute.Value, 0)
+                    : new TimeSpan((int)_wx.Hour.Value, (int)_wx.Minute.Value, 0));
 
                 if (!SchedulePrompt.Ask(which, at))
                 {
@@ -4156,6 +4407,7 @@ namespace QQCacheTray
             return rv > CurrentVersion;
         }
 
+        // 代理（可选），例如 http://127.0.0.1:7890
         public static Info Fetch(string url)
         {
             ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
@@ -4167,6 +4419,7 @@ namespace QQCacheTray
             req.Timeout = 8000;
             req.ReadWriteTimeout = 8000;
             req.UserAgent = "QQCacheTray/" + CurrentVersion;
+            req.Proxy = WebRequest.DefaultWebProxy;   // 跟随系统代理（不内置任何第三方软件）
             req.CachePolicy = new System.Net.Cache.RequestCachePolicy(
                 System.Net.Cache.RequestCacheLevel.NoCacheNoStore);
 
@@ -4219,6 +4472,7 @@ namespace QQCacheTray
                         dl.Timeout = 20000;
                         dl.ReadWriteTimeout = 30000;
                         dl.UserAgent = "QQCacheTray/" + UpdateChecker.CurrentVersion;
+                        dl.Proxy = WebRequest.DefaultWebProxy;
 
                         using (WebResponse resp = dl.GetResponse())
                         using (Stream rs = resp.GetResponseStream())
