@@ -21,13 +21,14 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("QQ 缓存管家")]
 [assembly: System.Reflection.AssemblyDescription("定时清理 QQ 本地聊天缓存")]
-[assembly: System.Reflection.AssemblyVersion("1.2.10.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.0.0")]
 
 namespace QQCacheTray
 {
     internal static class Program
     {
         internal static bool SettingsOnStart;
+        internal static int SettingsTab;
         internal static bool UpdateOnStart;
 
         // 只在测试时用：不走界面，直接下载并替换，方便自动化验证
@@ -82,6 +83,26 @@ namespace QQCacheTray
             }
         }
 
+        // 只在测试时用：立刻按容量上限跑一次
+        private static int RunLimitOnce()
+        {
+            try
+            {
+                Logger.EnsureDir();
+                Config cfg = Config.Load();
+                int code = 0;
+                if (cfg.Enabled && cfg.LimitEnabled) { Cleaner.EnforceLimit(cfg, false, Logger.Log); code++; }
+                if (cfg.WxEnabled && cfg.WxLimitEnabled) { Cleaner.EnforceLimit(cfg, true, Logger.Log); code++; }
+                Logger.Log("limit-now 完成，处理了 " + code + " 个应用");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("limit-now 异常：" + ex);
+                return 1;
+            }
+        }
+
         [STAThread]
         private static void Main(string[] args)
         {
@@ -104,6 +125,7 @@ namespace QQCacheTray
             bool settingsMode = false;
             bool forceUpdate = false;
             bool updateNow = false;
+            bool limitNow = false;
             foreach (string a in args)
             {
                 if (string.Equals(a, "--boot", StringComparison.OrdinalIgnoreCase)) bootMode = true;
@@ -112,8 +134,11 @@ namespace QQCacheTray
                 if (string.Equals(a, "--clean", StringComparison.OrdinalIgnoreCase)) cleanOnce = true;
                 if (string.Equals(a, "--diag", StringComparison.OrdinalIgnoreCase)) diag = true;
                 if (string.Equals(a, "--settings", StringComparison.OrdinalIgnoreCase)) settingsMode = true;
+                if (string.Equals(a, "qq", StringComparison.OrdinalIgnoreCase)) Program.SettingsTab = 1;
+                if (string.Equals(a, "wx", StringComparison.OrdinalIgnoreCase)) Program.SettingsTab = 0;
                 if (string.Equals(a, "--update", StringComparison.OrdinalIgnoreCase)) forceUpdate = true;
                 if (string.Equals(a, "--update-now", StringComparison.OrdinalIgnoreCase)) updateNow = true;
+                if (string.Equals(a, "--limit-now", StringComparison.OrdinalIgnoreCase)) limitNow = true;
             }
 
             Program.SettingsOnStart = settingsMode;
@@ -122,6 +147,12 @@ namespace QQCacheTray
             if (updateNow)
             {
                 Environment.ExitCode = RunSelfUpdateOnce();
+                return;
+            }
+
+            if (limitNow)
+            {
+                Environment.ExitCode = RunLimitOnce();
                 return;
             }
 
@@ -141,8 +172,8 @@ namespace QQCacheTray
 
             // 开机自启：两个应用都没开“定时自动清理”时，只检查一次日期，没到期就 90 秒后退出
             Config bootCfg = Config.Load();
-            bool needResident = (bootCfg.Enabled && bootCfg.AutoCleanEnabled)
-                             || (bootCfg.WxEnabled && bootCfg.WxAutoCleanEnabled);
+            bool needResident = (bootCfg.Enabled && (bootCfg.AutoCleanEnabled || bootCfg.LimitEnabled))
+                             || (bootCfg.WxEnabled && (bootCfg.WxAutoCleanEnabled || bootCfg.WxLimitEnabled));
 
             if (bootMode && !needResident)
             {
@@ -152,9 +183,10 @@ namespace QQCacheTray
 
             if (bootMode)
             {
-                Logger.Log(string.Format("开机启动：定时清理已开启（QQ={0}，微信={1}），保持常驻",
+                Logger.Log(string.Format("开机启动：自动清理已开启（QQ={0}，微信={1}，上限模式={2}），保持常驻",
                     bootCfg.Enabled && bootCfg.AutoCleanEnabled,
-                    bootCfg.WxEnabled && bootCfg.WxAutoCleanEnabled));
+                    bootCfg.WxEnabled && bootCfg.WxAutoCleanEnabled,
+                    (bootCfg.Enabled && bootCfg.LimitEnabled) || (bootCfg.WxEnabled && bootCfg.WxLimitEnabled)));
             }
 
             if (selfTest)
@@ -534,6 +566,25 @@ namespace QQCacheTray
                         sb.AppendLine("UPD_CTRL: " + c.GetType().Name + " text=[" + c.Text + "] bounds=" + c.Bounds);
                 }
 
+                try
+                {
+                    Config shot = Config.Load();
+                    using (SettingsForm f = new SettingsForm(shot))
+                    {
+                        f.Show();
+                        Application.DoEvents();
+                        System.Threading.Thread.Sleep(300);
+                        Application.DoEvents();
+                        Bitmap bmp = new Bitmap(f.Width, f.Height);
+                        f.DrawToBitmap(bmp, new Rectangle(0, 0, f.Width, f.Height));
+                        bmp.Save(Path.Combine(Config.Dir, "settings.png"), System.Drawing.Imaging.ImageFormat.Png);
+                        bmp.Dispose();
+                        f.Close();
+                        sb.AppendLine("设置界面截图: settings.png");
+                    }
+                }
+                catch (Exception ex) { sb.AppendLine("设置界面截图失败：" + ex.Message); }
+
                 sb.AppendLine("RESULT: OK");
                 File.WriteAllText(Path.Combine(Config.Dir, "selftest-report.txt"), sb.ToString(), Encoding.UTF8);
                 return 0;
@@ -672,6 +723,14 @@ namespace QQCacheTray
         public bool WxPic = true;
         public bool WxVideo = true;
         public bool WxEmoji = true;
+
+        // 容量上限模式（与定时清理互斥）
+        public bool LimitEnabled = false;
+        public int LimitMB = 2048;
+        public bool LimitDeleteAll = false;
+        public bool WxLimitEnabled = false;
+        public int WxLimitMB = 2048;
+        public bool WxLimitDeleteAll = false;
         public bool WxVoice = true;
         public string WxRoot = "";
         public DateTime WxLastRun = DateTime.MinValue;
@@ -846,6 +905,12 @@ namespace QQCacheTray
                             case "wx_pic": c.WxPic = ParseBool(val, true); break;
                             case "wx_video": c.WxVideo = ParseBool(val, true); break;
                             case "wx_emoji": c.WxEmoji = ParseBool(val, true); break;
+                            case "limit_enabled": c.LimitEnabled = ParseBool(val, false); break;
+                            case "limit_mb": c.LimitMB = ParseInt(val, 2048); break;
+                            case "limit_delete_all": c.LimitDeleteAll = ParseBool(val, false); break;
+                            case "wx_limit_enabled": c.WxLimitEnabled = ParseBool(val, false); break;
+                            case "wx_limit_mb": c.WxLimitMB = ParseInt(val, 2048); break;
+                            case "wx_limit_delete_all": c.WxLimitDeleteAll = ParseBool(val, false); break;
                             case "wx_voice": c.WxVoice = ParseBool(val, true); break;
                             case "wx_root": c.WxRoot = val; break;
                         }
@@ -860,6 +925,13 @@ namespace QQCacheTray
                 c.WxLastRun = ReadWxLastRun();
             }
             catch { }
+
+            if (c.LimitMB < 100) c.LimitMB = 100;
+            if (c.WxLimitMB < 100) c.WxLimitMB = 100;
+
+            // 两种模式互斥：容量上限优先
+            if (c.LimitEnabled) c.AutoCleanEnabled = false;
+            if (c.WxLimitEnabled) c.WxAutoCleanEnabled = false;
 
             if (c.IntervalDays < 0) c.IntervalDays = 0;
             if (c.WxIntervalDays < 0) c.WxIntervalDays = 0;
@@ -902,6 +974,12 @@ namespace QQCacheTray
                 sb.AppendLine("wx_pic=" + (WxPic ? "1" : "0"));
                 sb.AppendLine("wx_video=" + (WxVideo ? "1" : "0"));
                 sb.AppendLine("wx_emoji=" + (WxEmoji ? "1" : "0"));
+                sb.AppendLine("limit_enabled=" + (LimitEnabled ? "1" : "0"));
+                sb.AppendLine("limit_mb=" + LimitMB);
+                sb.AppendLine("limit_delete_all=" + (LimitDeleteAll ? "1" : "0"));
+                sb.AppendLine("wx_limit_enabled=" + (WxLimitEnabled ? "1" : "0"));
+                sb.AppendLine("wx_limit_mb=" + WxLimitMB);
+                sb.AppendLine("wx_limit_delete_all=" + (WxLimitDeleteAll ? "1" : "0"));
                 sb.AppendLine("wx_voice=" + (WxVoice ? "1" : "0"));
                 sb.AppendLine("wx_root=" + (WxRoot ?? ""));
                 File.WriteAllText(ConfigPath, sb.ToString(), Encoding.UTF8);
@@ -1128,6 +1206,156 @@ namespace QQCacheTray
         {
             if (!cfg.Enabled) return false;
             return DateTime.Now >= DueAt(cfg);
+        }
+
+        // ---------------- 容量上限模式 ----------------
+
+        private sealed class CacheFile
+        {
+            public string Path;
+            public long Length;
+            public DateTime Time;
+        }
+
+        private static readonly Action<string> Silently = delegate { };
+
+        private static List<CacheFile> CollectCacheFiles(Config cfg, bool wx, Action<string> log)
+        {
+            List<CacheFile> list = new List<CacheFile>();
+            List<string> scanned = new List<string>();
+            Action<string> sink = log ?? Silently;
+
+            if (!wx)
+            {
+                foreach (string ntData in GetNtDataDirs(cfg, sink))
+                {
+                    foreach (string cat in cfg.Categories())
+                    {
+                        string catPath = Path.Combine(ntData, cat);
+                        if (!Directory.Exists(catPath)) continue;
+
+                        scanned.Clear();
+                        Walk(catPath, scanned, sink, 0);
+
+                        foreach (string f in scanned)
+                        {
+                            string rel = f.Substring(catPath.Length).TrimStart('\\');
+                            if (IsExcluded(rel, cfg, cat)) continue;
+                            try
+                            {
+                                FileInfo fi = new FileInfo(f);
+                                if (!fi.Exists) continue;
+                                CacheFile c = new CacheFile();
+                                c.Path = f; c.Length = fi.Length; c.Time = fi.LastWriteTime;
+                                list.Add(c);
+                            }
+                            catch { }
+                        }
+                    }
+                }
+            }
+            else
+            {
+                foreach (KeyValuePair<string, string> kv in GetWxCategoryDirs(cfg, sink))
+                {
+                    if (!Directory.Exists(kv.Value)) continue;
+
+                    scanned.Clear();
+                    Walk(kv.Value, scanned, sink, 0);
+
+                    foreach (string f in scanned)
+                    {
+                        try
+                        {
+                            FileInfo fi = new FileInfo(f);
+                            if (!fi.Exists) continue;
+                            CacheFile c = new CacheFile();
+                            c.Path = f; c.Length = fi.Length; c.Time = fi.LastWriteTime;
+                            list.Add(c);
+                        }
+                        catch { }
+                    }
+                }
+            }
+
+            return list;
+        }
+
+        // 显示用的“缓存所在盘”：取第一个解析到的目录
+        public static string PrimaryRoot(Config cfg, bool wx)
+        {
+            try
+            {
+                if (!wx)
+                {
+                    List<string> dirs = GetNtDataDirs(cfg, Silently);
+                    if (dirs.Count > 0) return dirs[0];
+                }
+                else
+                {
+                    List<KeyValuePair<string, string>> dirs = GetWxCategoryDirs(cfg, Silently);
+                    if (dirs.Count > 0) return dirs[0].Value;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        // 缓存占用（字节）
+        public static long MeasureCache(Config cfg, bool wx, Action<string> log)
+        {
+            long total = 0;
+            foreach (CacheFile f in CollectCacheFiles(cfg, wx, log)) total += f.Length;
+            return total;
+        }
+
+        // 超过上限就清理：删旧文件（保留到 90% 以下）或全删
+        public static CleanResult EnforceLimit(Config cfg, bool wx, Action<string> log)
+        {
+            CleanResult result = new CleanResult();
+            Action<string> sink = log ?? Silently;
+
+            int limitMB = wx ? cfg.WxLimitMB : cfg.LimitMB;
+            bool deleteAll = wx ? cfg.WxLimitDeleteAll : cfg.LimitDeleteAll;
+            long limit = Math.Max(100, limitMB) * 1024L * 1024L;
+
+            List<CacheFile> files = CollectCacheFiles(cfg, wx, sink);
+            long total = 0;
+            foreach (CacheFile f in files) total += f.Length;
+
+            string tag = wx ? "微信" : "QQ";
+            if (total <= limit)
+            {
+                sink(string.Format("{0} 缓存 {1}，未超过上限 {2}", tag, FormatSize(total), FormatSize(limit)));
+                return result;
+            }
+
+            sink(string.Format("{0} 缓存 {1} 超过上限 {2}，开始{3}", tag,
+                FormatSize(total), FormatSize(limit), deleteAll ? "全部删除" : "删除旧文件"));
+
+            files.Sort(delegate (CacheFile a, CacheFile b) { return a.Time.CompareTo(b.Time); });
+
+            long target = deleteAll ? 0 : (long)(limit * 0.9);
+            foreach (CacheFile f in files)
+            {
+                if (total <= target) break;
+                try
+                {
+                    File.Delete(f.Path);
+                    result.TotalDeleted++;
+                    result.TotalFreed += f.Length;
+                    total -= f.Length;
+                }
+                catch (Exception ex)
+                {
+                    result.TotalFailed++;
+                    if (result.TotalFailed <= 3) sink("删除失败：" + f.Path + " -> " + ex.Message);
+                }
+            }
+
+            sink(string.Format("上限清理完成：删除 {0} 个文件，释放 {1}，剩余 {2}",
+                result.TotalDeleted, FormatSize(result.TotalFreed), FormatSize(total)));
+            return result;
         }
 
         public static string FormatSize(long bytes)
@@ -1794,6 +2022,7 @@ namespace QQCacheTray
         private Config _cfg;
         private bool _busy;
         private bool _settingsOpen;
+        private int _limitTick;
         private UpdateChecker.Info _pendingUpdate;
         private bool _promptOpen;
 
@@ -2027,6 +2256,19 @@ namespace QQCacheTray
             if (_cfg.WxAutoCleanEnabled && Cleaner.IsWxDueNow(_cfg))
             {
                 RunClean(true);
+            }
+
+            // 每 10 分钟检查一次容量上限
+            _limitTick++;
+            if (_limitTick >= 10)
+            {
+                _limitTick = 0;
+                try
+                {
+                    if (_cfg.Enabled && _cfg.LimitEnabled) Cleaner.EnforceLimit(_cfg, false, Logger.Log);
+                    if (_cfg.WxEnabled && _cfg.WxLimitEnabled) Cleaner.EnforceLimit(_cfg, true, Logger.Log);
+                }
+                catch (Exception ex) { Logger.Log("容量上限检查失败：" + ex.Message); }
             }
 
             // 常驻时每 12 小时查一次更新（长时间不重启也能收到通知）
@@ -2415,6 +2657,104 @@ namespace QQCacheTray
 
     // ---------------------------------------------------------------- 设置窗口
 
+    // 存储空间环形图：浅灰=可用，浅紫=电脑已用，紫色=本应用缓存
+    internal sealed class Donut : Control
+    {
+        public long AppBytes;
+        public long OtherBytes;
+        public long TotalBytes;
+        public string CenterText = "";
+        public string SubText = "";
+        public Color Accent = Color.FromArgb(139, 92, 246);
+
+        private static readonly Color TrackColor = Color.FromArgb(236, 238, 244);
+        private static readonly Color OtherColor = Color.FromArgb(196, 181, 253);
+
+        public Donut()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            BackColor = Color.White;
+        }
+
+        private readonly Font _big = new Font("Microsoft YaHei UI", 15F, FontStyle.Bold);
+        private readonly Font _small = new Font("Microsoft YaHei UI", 9F);
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { _big.Dispose(); _small.Dispose(); }
+            base.Dispose(disposing);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            try { PaintCore(e.Graphics); }
+            catch (Exception ex) { Logger.Log("环形图绘制失败：" + ex); }
+        }
+
+        private void PaintCore(Graphics g)
+        {
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.Clear(BackColor);
+
+            int thickness = 14;
+            int d = Math.Min(Width, Height) - thickness - 18;
+            if (d < 30) return;
+
+            Rectangle rect = new Rectangle((Width - d) / 2, 6, d, d);
+
+            using (Pen pen = new Pen(TrackColor, thickness))
+            {
+                pen.StartCap = System.Drawing.Drawing2D.LineCap.Round;
+                pen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                g.DrawEllipse(pen, rect);
+            }
+
+            double total = Math.Max(1.0, (double)TotalBytes);
+            double app = Math.Max(0.0, Math.Min((double)AppBytes, total));
+            double other = Math.Max(0.0, Math.Min((double)OtherBytes, total - app));
+
+            float start = -90f;
+
+            if (other > 0.5)
+            {
+                float sweep = (float)(other / total * 360.0);
+                using (Pen pen = new Pen(OtherColor, thickness))
+                {
+                    pen.StartCap = System.Drawing.Drawing2D.LineCap.Round;
+                    pen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                    g.DrawArc(pen, rect, start, Math.Min(sweep, 359.5f));
+                }
+                start += sweep;
+            }
+
+            if (app > 0.5)
+            {
+                float sweep = (float)(app / total * 360.0);
+                using (Pen pen = new Pen(Accent, thickness))
+                {
+                    pen.StartCap = System.Drawing.Drawing2D.LineCap.Round;
+                    pen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                    g.DrawArc(pen, rect, start, Math.Min(sweep, 359.5f));
+                }
+            }
+
+            // 圆心文字
+            RectangleF inner = new RectangleF(rect.X, rect.Y, rect.Width, rect.Height);
+            using (StringFormat sf = new StringFormat())
+            {
+                sf.Alignment = StringAlignment.Center;
+                sf.LineAlignment = StringAlignment.Center;
+
+                RectangleF r1 = new RectangleF(inner.X, inner.Y - 12, inner.Width, inner.Height);
+                g.DrawString(CenterText ?? "", _big, Brushes.Black, r1, sf);
+
+                RectangleF r2 = new RectangleF(inner.X, inner.Y + 26, inner.Width, inner.Height);
+                g.DrawString(SubText ?? "", _small, Brushes.Gray, r2, sf);
+            }
+        }
+    }
+
     internal sealed class SettingsForm : Form
     {
         private readonly Config _cfg;
@@ -2427,16 +2767,27 @@ namespace QQCacheTray
 
         private CheckBox _chkAutoStart;
         private Label _lblTaskWarn;
+        private Panel _updateBar;
+        private Label _updateText;
         private Button _btnKillTask;
 
         private sealed class AppPanel
         {
             public bool IsWx;
             public CheckBox Enabled;
-            public CheckBox Auto;
+
+            public Button ModeTimed;
+            public Button ModeLimit;
+            public bool LimitMode;
+
             public DateTimePicker Time;
             public NumericUpDown Interval;
+            public NumericUpDown LimitMB;
+            public Button ActOld;
+            public Button ActAll;
+            public bool DeleteAll;
             public NumericUpDown Keep;
+
             public TextBox Root;
             public Label Detect;
             public CheckBox Pic;
@@ -2445,12 +2796,20 @@ namespace QQCacheTray
             public CheckBox Voice;
             public CheckBox SysEmoji;
             public CheckBox PersonalEmoji;
+
             public Label Last;
             public Label Next;
-            public Label Size;
             public Label Countdown;
+            public Label Size;
             public Button CleanNow;
             public Button Rescan;
+
+            public Donut Ring;
+            public Label LblEvery;   // “每隔”
+            public Label LblDays;    // “天  每次”
+            public Label LblClean;   // “清理”
+            public Label LblLimit;   // “上限”
+            public Label LblMB;      // “MB”
         }
 
         public SettingsForm(Config cfg)
@@ -2504,7 +2863,7 @@ namespace QQCacheTray
 
         private void BuildUi()
         {
-            Text = "QQ 缓存管家 - 设置";
+            Text = "缓存清理 - 设置";
             Icon = IconFactory.Create(32);
             Font = new Font("Microsoft YaHei UI", 9F);
             ClientSize = new Size(470, 700);
@@ -2513,37 +2872,40 @@ namespace QQCacheTray
             MaximizeBox = false;
             MinimizeBox = false;
             ShowInTaskbar = true;
+            BackColor = Color.FromArgb(246, 247, 250);
 
             TabControl tabs = new TabControl();
-            tabs.SetBounds(12, 10, 446, 520);
+            tabs.SetBounds(12, 10, 446, 530);
             tabs.Font = new Font("Microsoft YaHei UI", 9F);
             Controls.Add(tabs);
 
             TabPage pageWx = new TabPage("微信");
-            pageWx.BackColor = SystemColors.Control;
+            pageWx.BackColor = Color.White;
             tabs.TabPages.Add(pageWx);
 
             TabPage pageQq = new TabPage("QQ");
-            pageQq.BackColor = SystemColors.Control;
+            pageQq.BackColor = Color.White;
             tabs.TabPages.Add(pageQq);
 
             _wx = BuildPage(pageWx, true);
             _qq = BuildPage(pageQq, false);
 
+            if (Program.SettingsTab == 1) tabs.SelectedIndex = 1;
+
             _chkAutoStart = new CheckBox();
             _chkAutoStart.Text = "开机自动启动（登录时请求管理员权限）";
-            _chkAutoStart.SetBounds(16, 540, 430, 24);
+            _chkAutoStart.SetBounds(18, 548, 430, 24);
             Controls.Add(_chkAutoStart);
 
             _lblTaskWarn = new Label();
             _lblTaskWarn.ForeColor = Color.FromArgb(180, 90, 0);
-            _lblTaskWarn.SetBounds(16, 566, 438, 32);
+            _lblTaskWarn.SetBounds(16, 572, 438, 32);
             _lblTaskWarn.Visible = false;
             Controls.Add(_lblTaskWarn);
 
             _btnKillTask = new Button();
             _btnKillTask.Text = "停用旧的计划任务";
-            _btnKillTask.SetBounds(16, 600, 150, 26);
+            _btnKillTask.SetBounds(16, 604, 150, 26);
             _btnKillTask.Visible = false;
             _btnKillTask.Click += delegate { KillLegacyTask(); };
             Controls.Add(_btnKillTask);
@@ -2566,162 +2928,190 @@ namespace QQCacheTray
             CancelButton = btnCancel;
         }
 
+        private static Label MakeLabel(string text, int x, int y, int w, int h)
+        {
+            Label l = new Label();
+            l.Text = text;
+            l.SetBounds(x, y, w, h);
+            l.TextAlign = ContentAlignment.MiddleLeft;
+            return l;
+        }
+
+        private static Button MakeSeg(string text, int x, int y, int w)
+        {
+            Button b = new Button();
+            b.Text = text;
+            b.SetBounds(x, y, w, 28);
+            b.FlatStyle = FlatStyle.Flat;
+            b.FlatAppearance.BorderColor = Color.FromArgb(200, 205, 215);
+            b.BackColor = Color.FromArgb(245, 246, 250);
+            return b;
+        }
+
         private AppPanel BuildPage(TabPage page, bool isWx)
         {
             AppPanel p = new AppPanel();
             p.IsWx = isWx;
+            page.BackColor = Color.White;
+
+            // ---- 顶部：环形图 ----
+            p.Ring = new Donut();
+            p.Ring.SetBounds(8, 4, 430, 150);
+            p.Ring.Accent = Color.FromArgb(139, 92, 246);
+            page.Controls.Add(p.Ring);
+
+            Label legend1 = MakeLabel("● " + (isWx ? "微信" : "QQ") + "缓存", 52, 154, 130, 18);
+            legend1.ForeColor = Color.FromArgb(139, 92, 246);
+            page.Controls.Add(legend1);
+
+            Label legend2 = MakeLabel("● 电脑已用空间", 176, 154, 140, 18);
+            legend2.ForeColor = Color.FromArgb(196, 181, 253);
+            page.Controls.Add(legend2);
+
+            Label legend3 = MakeLabel("● 电脑可用空间", 306, 154, 130, 18);
+            legend3.ForeColor = Color.FromArgb(200, 205, 215);
+            page.Controls.Add(legend3);
+
+            // ---- 配置 ----
+            Label cfgTitle = MakeLabel("配置", 8, 178, 100, 22);
+            cfgTitle.Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold);
+            page.Controls.Add(cfgTitle);
 
             p.Enabled = new CheckBox();
             p.Enabled.Text = "启用自动清理";
-            p.Enabled.SetBounds(8, 10, 400, 24);
+            p.Enabled.SetBounds(6, 202, 220, 24);
             p.Enabled.CheckedChanged += delegate { UpdatePanel(p); };
             page.Controls.Add(p.Enabled);
 
-            p.Auto = new CheckBox();
-            p.Auto.Text = "开启定时自动清理（不勾选：开机只检查日期，没到期 90 秒后退出）";
-            p.Auto.SetBounds(24, 38, 400, 24);
-            p.Auto.CheckedChanged += delegate { UpdatePanel(p); };
-            page.Controls.Add(p.Auto);
+            p.ModeTimed = MakeSeg("定时清理", 8, 230, 100);
+            p.ModeTimed.Click += delegate { p.LimitMode = false; UpdatePanel(p); SyncRing(p); };
+            page.Controls.Add(p.ModeTimed);
 
-            Label lTime = new Label();
-            lTime.Text = "每次";
-            lTime.SetBounds(24, 70, 34, 22);
-            page.Controls.Add(lTime);
+            p.ModeLimit = MakeSeg("容量上限", 112, 230, 100);
+            p.ModeLimit.Click += delegate { p.LimitMode = true; UpdatePanel(p); SyncRing(p); };
+            page.Controls.Add(p.ModeLimit);
 
+            // 定时模式两行
             p.Time = new DateTimePicker();
             p.Time.Format = DateTimePickerFormat.Custom;
             p.Time.CustomFormat = "HH:mm";
             p.Time.ShowUpDown = true;
-            p.Time.SetBounds(62, 68, 70, 24);
+            p.Time.SetBounds(204, 266, 74, 24);
             page.Controls.Add(p.Time);
 
-            Label lTime2 = new Label();
-            lTime2.Text = "清理";
-            lTime2.SetBounds(140, 70, 60, 22);
-            page.Controls.Add(lTime2);
-
-            Label l1 = new Label();
-            l1.Text = "每隔";
-            l1.SetBounds(24, 102, 40, 22);
-            page.Controls.Add(l1);
+            Label lEvery = MakeLabel("每隔", 8, 268, 36, 22);
+            page.Controls.Add(lEvery);
+            p.LblEvery = lEvery;
 
             p.Interval = new NumericUpDown();
             p.Interval.Minimum = 0;
             p.Interval.Maximum = 90;
-            p.Interval.SetBounds(66, 100, 60, 24);
+            p.Interval.SetBounds(44, 266, 54, 24);
             page.Controls.Add(p.Interval);
 
-            Label l2 = new Label();
-            l2.Text = "天清理一次（0 = 当天）";
-            l2.SetBounds(134, 102, 160, 22);
-            page.Controls.Add(l2);
+            Label lDay = MakeLabel("天  每次", 100, 268, 40, 22);
+            lDay.AutoSize = false;
+            lDay.SetBounds(100, 268, 100, 22);
+            page.Controls.Add(lDay);
+            p.LblDays = lDay;
 
-            Label l3 = new Label();
-            l3.Text = "保留最近";
-            l3.SetBounds(24, 134, 60, 22);
-            page.Controls.Add(l3);
+            Label lClean = MakeLabel("清理", 282, 268, 40, 22);
+            page.Controls.Add(lClean);
+            p.LblClean = lClean;
 
+            // 上限模式两行
+            p.LimitMB = new NumericUpDown();
+            p.LimitMB.Minimum = 100;
+            p.LimitMB.Maximum = 200000;
+            p.LimitMB.Increment = 256;
+            p.LimitMB.SetBounds(74, 266, 70, 24);
+            page.Controls.Add(p.LimitMB);
+
+            Label lLimit = MakeLabel("文件到达", 8, 268, 64, 22);
+            page.Controls.Add(lLimit);
+            p.LblLimit = lLimit;
+
+            Label lMB = MakeLabel("MB 时", 148, 268, 46, 22);
+            page.Controls.Add(lMB);
+            p.LblMB = lMB;
+
+            p.ActOld = MakeSeg("删除旧文件", 196, 264, 100);
+            p.ActOld.Click += delegate { p.DeleteAll = false; UpdatePanel(p); };
+            page.Controls.Add(p.ActOld);
+
+            p.ActAll = MakeSeg("删除全部", 300, 264, 100);
+            p.ActAll.Click += delegate { p.DeleteAll = true; UpdatePanel(p); };
+            page.Controls.Add(p.ActAll);
+
+            // 保留
+            page.Controls.Add(MakeLabel("保留最近", 8, 300, 70, 22));
             p.Keep = new NumericUpDown();
             p.Keep.Minimum = 0;
             p.Keep.Maximum = 365;
-            p.Keep.SetBounds(88, 132, 60, 24);
+            p.Keep.SetBounds(80, 298, 54, 24);
             page.Controls.Add(p.Keep);
+            page.Controls.Add(MakeLabel("天（0 = 只留当天）", 140, 300, 200, 22));
 
-            Label l4 = new Label();
-            l4.Text = "天（0 = 只留当天）";
-            l4.SetBounds(156, 134, 200, 22);
-            page.Controls.Add(l4);
-
-            Label l5 = new Label();
-            l5.Text = isWx ? "微信目录" : "QQ 目录";
-            l5.SetBounds(24, 166, 80, 22);
-            page.Controls.Add(l5);
-
+            // 目录
+            page.Controls.Add(MakeLabel("目录", 8, 332, 36, 22));
             p.Root = new TextBox();
-            p.Root.SetBounds(106, 164, 200, 24);
+            p.Root.SetBounds(44, 330, 282, 24);
             page.Controls.Add(p.Root);
 
-            Button btnBrowse = new Button();
-            btnBrowse.Text = "浏览…";
-            btnBrowse.SetBounds(312, 162, 52, 26);
+            Button btnBrowse = MakeSeg("浏览", 330, 328, 48);
             btnBrowse.Click += delegate { BrowseRoot(p); };
             page.Controls.Add(btnBrowse);
 
-            Button btnAuto = new Button();
-            btnAuto.Text = "自动";
-            btnAuto.SetBounds(368, 162, 46, 26);
+            Button btnAuto = MakeSeg("自动", 382, 328, 48);
             btnAuto.Click += delegate { p.Root.Text = ""; RefreshSize(p); };
             page.Controls.Add(btnAuto);
 
-            p.Detect = new Label();
-            p.Detect.Text = "正在检测…";
+            p.Detect = MakeLabel("正在检测…", 44, 356, 380, 18);
             p.Detect.ForeColor = Color.Gray;
-            p.Detect.SetBounds(106, 190, 300, 18);
             page.Controls.Add(p.Detect);
 
-            GroupBox grp = new GroupBox();
-            grp.Text = "清理内容";
-            grp.SetBounds(8, 214, 408, 112);
-            page.Controls.Add(grp);
-
-            p.Pic = MakeCheck("图片", 16, 26);
-            p.Video = MakeCheck("视频", 206, 26);
-            p.Emoji = MakeCheck("表情", 16, 54);
-            p.Voice = MakeCheck(isWx ? "语音" : "语音", 206, 54);
-            grp.Controls.Add(p.Pic);
-            grp.Controls.Add(p.Video);
-            grp.Controls.Add(p.Emoji);
-            grp.Controls.Add(p.Voice);
+            // 清理内容
+            page.Controls.Add(MakeLabel("清理内容", 8, 382, 70, 22));
+            p.Pic = MakeCheck("图片", 84, 380); p.Pic.SetBounds(84, 380, 70, 22);
+            p.Video = MakeCheck("视频", 160, 380); p.Video.SetBounds(160, 380, 70, 22);
+            p.Emoji = MakeCheck("表情", 236, 380); p.Emoji.SetBounds(236, 380, 70, 22);
+            p.Voice = MakeCheck("语音", 312, 380); p.Voice.SetBounds(312, 380, 70, 22);
+            page.Controls.Add(p.Pic);
+            page.Controls.Add(p.Video);
+            page.Controls.Add(p.Emoji);
+            page.Controls.Add(p.Voice);
 
             if (!isWx)
             {
-                p.SysEmoji = MakeCheck("系统表情资源（+150 MB）", 16, 82);
-                p.PersonalEmoji = MakeCheck("我收藏的表情", 206, 82);
-                grp.Controls.Add(p.SysEmoji);
-                grp.Controls.Add(p.PersonalEmoji);
-            }
-            else
-            {
-                Label tip = new Label();
-                tip.Text = "注：聊天数据库和接收的文件不会被清理。";
-                tip.ForeColor = Color.Gray;
-                tip.SetBounds(16, 82, 380, 20);
-                grp.Controls.Add(tip);
+                p.SysEmoji = MakeCheck("系统表情", 84, 404);
+                p.SysEmoji.SetBounds(84, 404, 80, 22);
+                p.PersonalEmoji = MakeCheck("收藏表情", 170, 404);
+                p.PersonalEmoji.SetBounds(170, 404, 80, 22);
+                page.Controls.Add(p.SysEmoji);
+                page.Controls.Add(p.PersonalEmoji);
             }
 
-            GroupBox grpStatus = new GroupBox();
-            grpStatus.Text = "状态";
-            grpStatus.SetBounds(8, 330, 408, 116);
-            page.Controls.Add(grpStatus);
+            // 状态
+            p.Last = MakeLabel("上次清理：从未清理", 8, 426, 300, 18);
+            page.Controls.Add(p.Last);
 
-            p.Last = new Label();
-            p.Last.SetBounds(12, 18, 270, 20);
-            grpStatus.Controls.Add(p.Last);
+            p.Next = MakeLabel("", 8, 444, 430, 18);
+            page.Controls.Add(p.Next);
 
-            p.Next = new Label();
-            p.Next.SetBounds(12, 38, 270, 20);
-            grpStatus.Controls.Add(p.Next);
-
-            p.Countdown = new Label();
-            p.Countdown.SetBounds(12, 58, 270, 20);
+            p.Countdown = MakeLabel("", 8, 460, 232, 18);
             p.Countdown.ForeColor = Color.FromArgb(0, 100, 180);
-            grpStatus.Controls.Add(p.Countdown);
+            page.Controls.Add(p.Countdown);
 
-            p.Size = new Label();
-            p.Size.SetBounds(12, 78, 240, 20);
-            grpStatus.Controls.Add(p.Size);
+            p.Size = MakeLabel("当前占用：统计中…", 8, 478, 232, 18);
+            page.Controls.Add(p.Size);
 
-            p.Rescan = new Button();
-            p.Rescan.Text = "重新统计";
-            p.Rescan.SetBounds(292, 74, 100, 26);
-            p.Rescan.Click += delegate { RefreshSize(p); };
-            grpStatus.Controls.Add(p.Rescan);
-
-            p.CleanNow = new Button();
-            p.CleanNow.Text = "立即清理";
-            p.CleanNow.SetBounds(8, 452, 110, 26);
+            p.CleanNow = MakeSeg("立即清理", 246, 472, 100);
             p.CleanNow.Click += delegate { CleanNow(p); };
             page.Controls.Add(p.CleanNow);
+
+            p.Rescan = MakeSeg("重新统计", 352, 472, 78);
+            p.Rescan.Click += delegate { RefreshSize(p); };
+            page.Controls.Add(p.Rescan);
 
             return p;
         }
@@ -2752,122 +3142,136 @@ namespace QQCacheTray
             return Math.Max(lo, Math.Min(hi, v));
         }
 
+        private void SyncRing(AppPanel p)
+        {
+            p.Interval.Visible = !p.LimitMode;
+            p.Time.Visible = !p.LimitMode;
+            if (p.LblEvery != null) p.LblEvery.Visible = !p.LimitMode;
+            if (p.LblDays != null) p.LblDays.Visible = !p.LimitMode;
+            if (p.LblClean != null) p.LblClean.Visible = !p.LimitMode;
+
+            p.LimitMB.Visible = p.LimitMode;
+            p.ActOld.Visible = p.LimitMode;
+            p.ActAll.Visible = p.LimitMode;
+            if (p.LblLimit != null) p.LblLimit.Visible = p.LimitMode;
+            if (p.LblMB != null) p.LblMB.Visible = p.LimitMode;
+        }
+
         private void LoadPanel(AppPanel p, Config c)
         {
             if (p == null) return;
 
-            if (p.IsWx)
+            bool wx = p.IsWx;
+
+            p.Enabled.Checked = wx ? c.WxEnabled : c.Enabled;
+            p.LimitMode = wx ? c.WxLimitEnabled : c.LimitEnabled;
+
+            p.Time.Value = SafeDate(TimeValue(wx ? c.WxCleanHour : c.CleanHour,
+                                              wx ? c.WxCleanMinute : c.CleanMinute));
+            p.Interval.Value = Clamp(wx ? c.WxIntervalDays : c.IntervalDays, 0, 90);
+            p.LimitMB.Value = Clamp(wx ? c.WxLimitMB : c.LimitMB, 100, 200000);
+            p.DeleteAll = wx ? c.WxLimitDeleteAll : c.LimitDeleteAll;
+            p.Keep.Value = Clamp(wx ? c.WxKeepDays : c.KeepDays, 0, 365);
+            p.Root.Text = (wx ? c.WxRoot : c.QqRoot) ?? "";
+
+            p.Pic.Checked = wx ? c.WxPic : c.Pic;
+            p.Video.Checked = wx ? c.WxVideo : c.Video;
+            p.Emoji.Checked = wx ? c.WxEmoji : c.Emoji;
+            p.Voice.Checked = wx ? c.WxVoice : c.Ptt;
+
+            if (!wx)
             {
-                p.Enabled.Checked = c.WxEnabled;
-                p.Auto.Checked = c.WxAutoCleanEnabled;
-                p.Time.Value = SafeDate(TimeValue(c.WxCleanHour, c.WxCleanMinute));
-                p.Interval.Value = Clamp(c.WxIntervalDays, 0, 90);
-                p.Keep.Value = Clamp(c.WxKeepDays, 0, 365);
-                p.Root.Text = c.WxRoot ?? "";
-                p.Pic.Checked = c.WxPic;
-                p.Video.Checked = c.WxVideo;
-                p.Emoji.Checked = c.WxEmoji;
-                p.Voice.Checked = c.WxVoice;
-                p.Last.Text = "上次清理：" + (c.WxLastRun == DateTime.MinValue
-                    ? "从未清理" : c.WxLastRun.ToString("yyyy-MM-dd HH:mm"));
-                p.Next.Text = "下次检查：" + (c.WxEnabled
-                    ? Cleaner.WxDueAt(c).ToString("yyyy-MM-dd HH:mm") : "已关闭");
+                p.SysEmoji.Checked = c.IncludeSystemEmoji;
+                p.PersonalEmoji.Checked = c.IncludePersonalEmoji;
             }
-            else
-            {
-                p.Enabled.Checked = c.Enabled;
-                p.Auto.Checked = c.AutoCleanEnabled;
-                p.Time.Value = SafeDate(TimeValue(c.CleanHour, c.CleanMinute));
-                p.Interval.Value = Clamp(c.IntervalDays, 0, 90);
-                p.Keep.Value = Clamp(c.KeepDays, 0, 365);
-                p.Root.Text = c.QqRoot ?? "";
-                p.Pic.Checked = c.Pic;
-                p.Video.Checked = c.Video;
-                p.Emoji.Checked = c.Emoji;
-                p.Voice.Checked = c.Ptt;
-                if (p.SysEmoji != null) p.SysEmoji.Checked = c.IncludeSystemEmoji;
-                if (p.PersonalEmoji != null) p.PersonalEmoji.Checked = c.IncludePersonalEmoji;
-                p.Last.Text = "上次清理：" + (c.LastRun == DateTime.MinValue
-                    ? "从未清理" : c.LastRun.ToString("yyyy-MM-dd HH:mm"));
-                p.Next.Text = "下次检查：" + (c.Enabled
-                    ? Cleaner.DueAt(c).ToString("yyyy-MM-dd HH:mm") : "已关闭");
-            }
+
+            DateTime last = wx ? c.WxLastRun : c.LastRun;
+            p.Last.Text = "上次清理：" + (last == DateTime.MinValue ? "从未清理" : last.ToString("yyyy-MM-dd HH:mm"));
 
             UpdatePanel(p);
         }
 
         private void SavePanel(AppPanel p, Config c)
         {
-            if (p.IsWx)
+            bool wx = p.IsWx;
+            bool limit = p.LimitMode;
+
+            if (wx)
             {
                 c.WxEnabled = p.Enabled.Checked;
-                c.WxAutoCleanEnabled = p.Auto.Checked;
+                c.WxLimitEnabled = limit;
+                c.WxAutoCleanEnabled = p.Enabled.Checked && !limit;
                 c.WxCleanHour = p.Time.Value.Hour;
                 c.WxCleanMinute = p.Time.Value.Minute;
                 c.WxIntervalDays = (int)p.Interval.Value;
+                c.WxLimitMB = (int)p.LimitMB.Value;
+                c.WxLimitDeleteAll = p.DeleteAll;
                 c.WxKeepDays = (int)p.Keep.Value;
+                c.WxRoot = p.Root.Text.Trim();
                 c.WxPic = p.Pic.Checked;
                 c.WxVideo = p.Video.Checked;
                 c.WxEmoji = p.Emoji.Checked;
                 c.WxVoice = p.Voice.Checked;
-                c.WxRoot = (p.Root.Text ?? "").Trim();
             }
             else
             {
                 c.Enabled = p.Enabled.Checked;
-                c.AutoCleanEnabled = p.Auto.Checked;
+                c.LimitEnabled = limit;
+                c.AutoCleanEnabled = p.Enabled.Checked && !limit;
                 c.CleanHour = p.Time.Value.Hour;
                 c.CleanMinute = p.Time.Value.Minute;
                 c.IntervalDays = (int)p.Interval.Value;
+                c.LimitMB = (int)p.LimitMB.Value;
+                c.LimitDeleteAll = p.DeleteAll;
                 c.KeepDays = (int)p.Keep.Value;
+                c.QqRoot = p.Root.Text.Trim();
                 c.Pic = p.Pic.Checked;
                 c.Video = p.Video.Checked;
                 c.Emoji = p.Emoji.Checked;
                 c.Ptt = p.Voice.Checked;
+
                 if (p.SysEmoji != null) c.IncludeSystemEmoji = p.SysEmoji.Checked;
                 if (p.PersonalEmoji != null) c.IncludePersonalEmoji = p.PersonalEmoji.Checked;
-                c.QqRoot = (p.Root.Text ?? "").Trim();
             }
         }
 
         private void UpdatePanel(AppPanel p)
         {
             bool on = p.Enabled.Checked;
-
-            // 定时相关的才受总开关影响；手动清理永远可用
-            p.Auto.Enabled = on;
-            p.Time.Enabled = on && p.Auto.Checked;
-            p.Interval.Enabled = on;
-
+            p.ModeTimed.Enabled = on;
+            p.ModeLimit.Enabled = on;
             p.Keep.Enabled = true;
             p.CleanNow.Enabled = true;
+
+            SyncRing(p);
+
+            // 选中态
+            p.ModeTimed.BackColor = (!p.LimitMode) ? Color.FromArgb(139, 92, 246) : Color.FromArgb(245, 246, 250);
+            p.ModeTimed.ForeColor = (!p.LimitMode) ? Color.White : Color.Black;
+            p.ModeLimit.BackColor = p.LimitMode ? Color.FromArgb(139, 92, 246) : Color.FromArgb(245, 246, 250);
+            p.ModeLimit.ForeColor = p.LimitMode ? Color.White : Color.Black;
+
+            p.ActOld.BackColor = (!p.DeleteAll) ? Color.FromArgb(233, 226, 255) : Color.FromArgb(245, 246, 250);
+            p.ActAll.BackColor = p.DeleteAll ? Color.FromArgb(233, 226, 255) : Color.FromArgb(245, 246, 250);
+
+            bool timedOn = on && !p.LimitMode;
+            bool limitOn = on && p.LimitMode;
+            p.Time.Enabled = timedOn;
+            p.Interval.Enabled = timedOn;
+            p.LimitMB.Enabled = limitOn;
+            p.ActOld.Enabled = limitOn;
+            p.ActAll.Enabled = limitOn;
         }
 
         private void BrowseRoot(AppPanel p)
         {
-            using (FolderBrowserDialog dlg = new FolderBrowserDialog())
+            using (FolderBrowserDialog d = new FolderBrowserDialog())
             {
-                dlg.Description = p.IsWx
-                    ? "选择微信的 WeChat Files / xwechat_files 目录"
-                    : "选择 QQ 的 Tencent Files 目录（也可以直接选账号目录）";
-                dlg.ShowNewFolderButton = false;
-
-                string cur = (p.Root.Text ?? "").Trim();
-                if (Directory.Exists(cur))
+                d.Description = p.IsWx ? "选择微信数据目录" : "选择 QQ 数据目录";
+                d.SelectedPath = p.Root.Text;
+                if (d.ShowDialog() == DialogResult.OK)
                 {
-                    string parent = Path.GetDirectoryName(cur);
-                    dlg.SelectedPath = (!string.IsNullOrEmpty(parent) && Directory.Exists(parent)) ? parent : cur;
-                }
-                else
-                {
-                    string docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                    string guess = Path.Combine(docs, p.IsWx ? "WeChat Files" : "Tencent Files");
-                    if (Directory.Exists(guess)) dlg.SelectedPath = guess;
-                }
-
-                if (dlg.ShowDialog(this) == DialogResult.OK)
-                {
-                    p.Root.Text = dlg.SelectedPath;
+                    p.Root.Text = d.SelectedPath;
                     RefreshSize(p);
                 }
             }
@@ -2875,92 +3279,96 @@ namespace QQCacheTray
 
         private void UpdateCountdown(AppPanel p)
         {
-            if (p.Countdown == null) return;
-            DateTime last = p.IsWx ? _cfg.WxLastRun : _cfg.LastRun;
-            DateTime due = Cleaner.NextDue(last, (int)p.Interval.Value,
-                                           p.Time.Value.Hour, p.Time.Value.Minute);
+            Config tmp = new Config();
+            SavePanel(p, tmp);
+            if (!tmp.Enabled && !tmp.WxEnabled) { p.Next.Text = ""; p.Countdown.Text = "下次清理：已关闭"; return; }
 
-            p.Countdown.Text = Cleaner.CountdownText(p.Enabled.Checked, p.Auto.Checked, due);
+            if (p.LimitMode)
+            {
+                p.Next.Text = "检查方式：容量上限（每 10 分钟检查一次）";
+                p.Countdown.Text = "";
+                return;
+            }
+
+            DateTime due = p.IsWx ? Cleaner.WxDueAt(tmp) : Cleaner.DueAt(tmp);
+            p.Next.Text = "下次检查：" + due.ToString("yyyy-MM-dd HH:mm");
+            string cd = Cleaner.CountdownText(p.Enabled.Checked, !p.LimitMode, due);
+            int cut = cd.IndexOf('（');
+            if (cut > 0) cd = cd.Substring(0, cut);
+            p.Countdown.Text = cd;
         }
 
         private void RefreshSize(AppPanel p)
         {
-            p.Size.Text = "当前占用：统计中…";
-            p.Rescan.Enabled = false;
+            Config tmp = new Config();
+            SavePanel(p, tmp);
 
-            Config c = new Config();
-            SavePanel(p, c);
-            bool isWx = p.IsWx;
+            long cache = 0;
+            try { cache = Cleaner.MeasureCache(tmp, p.IsWx, null); } catch { }
 
-            ThreadPool.QueueUserWorkItem(delegate
+            string root = Cleaner.PrimaryRoot(tmp, p.IsWx);
+            long total = 0, free = 0;
+            try
             {
-                long size = isWx ? Cleaner.MeasureWx(c) : Cleaner.MeasureTotal(c);
-                try
-                {
-                    BeginInvoke((Action)delegate
-                    {
-                        p.Size.Text = "当前占用：" + Cleaner.FormatSize(size);
-                        p.Rescan.Enabled = true;
-                        p.Detect.Text = Cleaner.DescribeTargets(c, isWx);
-                        UpdateCountdown(p);
-                    });
-                }
-                catch { }
-            });
+                string drive = string.IsNullOrEmpty(root) ? "C:" : Path.GetPathRoot(root);
+                DriveInfo di = new DriveInfo(drive);
+                total = di.TotalSize;
+                free = di.AvailableFreeSpace;
+            }
+            catch { }
+
+            if (total <= 0) total = 1;
+
+            p.Ring.TotalBytes = total;
+            p.Ring.AppBytes = cache;
+            p.Ring.OtherBytes = Math.Max(0, (total - free) - cache);
+            p.Ring.CenterText = Cleaner.FormatSize(cache);
+
+            if (p.LimitMode)
+            {
+                long limit = (long)Math.Max(100, (int)p.LimitMB.Value) * 1024L * 1024L;
+                double pct = limit <= 0 ? 0 : cache * 100.0 / limit;
+                p.Ring.SubText = string.Format("占设置上限 {0:0.#}%", pct);
+            }
+            else
+            {
+                double pct = cache * 100.0 / total;
+                p.Ring.SubText = string.Format("占磁盘 {0:0.##}%", pct);
+            }
+            p.Ring.Invalidate();
+
+            p.Size.Text = "当前占用：" + Cleaner.FormatSize(cache);
+            p.Detect.Text = "自动检测：" + (string.IsNullOrEmpty(root) ? "未找到，请手动选择目录" : root);
+
+            UpdateCountdown(p);
         }
 
         private void CleanNow(AppPanel p)
         {
-            if (MessageBox.Show("确定立即清理" + (p.IsWx ? "微信" : "QQ") + "缓存？",
-                    "QQ 缓存管家", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+            Config tmp = new Config();
+            SavePanel(p, tmp);
+            tmp.PendingCleanQq = false;
+            tmp.PendingCleanWx = false;
 
-            Config c = new Config();
-            SavePanel(p, c);
-
-            bool isWx = p.IsWx;
-            p.CleanNow.Enabled = false;
-            Cursor = Cursors.WaitCursor;
-
-            ThreadPool.QueueUserWorkItem(delegate
+            CleanResult r;
+            if (p.LimitMode)
             {
-                CleanResult r = isWx ? Cleaner.RunWx(c, false, Logger.Log) : Cleaner.Run(c, false, Logger.Log);
+                r = Cleaner.EnforceLimit(tmp, p.IsWx, Logger.Log);
+            }
+            else
+            {
+                r = p.IsWx
+                    ? Cleaner.RunWx(tmp, false, Logger.Log)
+                    : Cleaner.Run(tmp, false, Logger.Log);
+            }
 
-                try
-                {
-                    BeginInvoke((Action)delegate
-                    {
-                        p.CleanNow.Enabled = true;
-                        Cursor = Cursors.Default;
+            if (string.IsNullOrEmpty(r.Error))
+            {
+                if (p.IsWx) tmp.SaveWxLastRun(DateTime.Now); else tmp.SaveLastRun(DateTime.Now);
+                tmp.Save();
+            }
 
-                        if (!string.IsNullOrEmpty(r.Error))
-                        {
-                            MessageBox.Show("清理失败：" + r.Error, "QQ 缓存管家", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        }
-                        else
-                        {
-                            if (isWx)
-                            {
-                                c.SaveWxLastRun(DateTime.Now);
-                                _cfg.WxLastRun = DateTime.Now;
-                            }
-                            else
-                            {
-                                c.SaveLastRun(DateTime.Now);
-                                _cfg.LastRun = DateTime.Now;
-                            }
-
-                            p.Last.Text = "上次清理：" + DateTime.Now.ToString("yyyy-MM-dd HH:mm");
-                            p.Next.Text = "下次检查：" + (isWx
-                                ? Cleaner.WxDueAt(c) : Cleaner.DueAt(c)).ToString("yyyy-MM-dd HH:mm");
-
-                            MessageBox.Show(string.Format("已清理 {0} 个文件，释放 {1}", r.TotalDeleted,
-                                Cleaner.FormatSize(r.TotalFreed)), "QQ 缓存管家");
-                        }
-                        RefreshSize(p);
-                    });
-                }
-                catch { }
-            });
+            RefreshSize(p);
         }
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -2975,9 +3383,6 @@ namespace QQCacheTray
             public uint uCount;
             public uint dwTimeout;
         }
-
-        private Panel _updateBar;
-        private Label _updateText;
 
         private void BuildUpdateBar()
         {
