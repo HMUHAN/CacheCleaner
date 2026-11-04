@@ -21,7 +21,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("QQ 缓存管家")]
 [assembly: System.Reflection.AssemblyDescription("定时清理 QQ 本地聊天缓存")]
-[assembly: System.Reflection.AssemblyVersion("1.3.3.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.4.0")]
 
 namespace QQCacheTray
 {
@@ -484,6 +484,9 @@ namespace QQCacheTray
                 sb.AppendLine(string.Format("闸门测试: 8天前={0} 1天前={1} 已关闭={2} -> {3}",
                     dueOld, dueNew, dueOff, (dueOld && !dueNew && !dueOff) ? "PASS" : "FAIL"));
 
+                // 往返测试会写 config.ini：先备份真实配置，测完立即还原，避免自检把用户设置清掉
+                string cfgBackup = File.Exists(Config.ConfigPath) ? File.ReadAllText(Config.ConfigPath) : null;
+
                 Config round = new Config();
                 round.Enabled = false;
                 round.AutoCleanEnabled = true;
@@ -497,6 +500,13 @@ namespace QQCacheTray
                 bool ok = back.Enabled == false && back.AutoCleanEnabled == true
                           && back.CleanHour == 4 && back.CleanMinute == 30
                           && back.IntervalDays == 3 && back.KeepDays == 5 && back.Emoji == false;
+
+                try
+                {
+                    if (cfgBackup != null) File.WriteAllText(Config.ConfigPath, cfgBackup);
+                    else File.Delete(Config.ConfigPath);
+                }
+                catch { }
                 sb.AppendLine();
                 string c1 = Cleaner.CountdownText(true, true, DateTime.Today, 7, 3, 0);
                 string c2 = Cleaner.CountdownText(true, true, DateTime.Now.AddDays(-30), 7, 3, 0);
@@ -2724,6 +2734,14 @@ namespace QQCacheTray
             catch (Exception ex) { Logger.Log("环形图绘制失败：" + ex); }
         }
 
+        private static float SafeSweep(double degrees)
+        {
+            if (double.IsNaN(degrees) || double.IsInfinity(degrees)) return 0f;
+            if (degrees < 0) return 0f;
+            if (degrees > 359.5) return 359.5f;
+            return (float)degrees;
+        }
+
         private void PaintCore(Graphics g)
         {
             Color track = Dark ? Color.FromArgb(48, 48, 54) : TrackColor;
@@ -2756,24 +2774,38 @@ namespace QQCacheTray
 
             if (other > 0.5)
             {
-                float sweep = (float)(other / total * 360.0);
-                using (Pen pen = new Pen(otherC, thickness))
+                float sweep = SafeSweep(other / total * 360.0);
+                if (sweep > 0.1f)
                 {
-                    pen.StartCap = System.Drawing.Drawing2D.LineCap.Round;
-                    pen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
-                    g.DrawArc(pen, rect, start, Math.Min(sweep, 359.5f));
+                    try
+                    {
+                        using (Pen pen = new Pen(otherC, thickness))
+                        {
+                            pen.StartCap = System.Drawing.Drawing2D.LineCap.Round;
+                            pen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                            g.DrawArc(pen, rect, start, sweep);
+                        }
+                        start += sweep;
+                    }
+                    catch { }
                 }
-                start += sweep;
             }
 
             if (app > 0.5)
             {
-                float sweep = (float)(app / total * 360.0);
-                using (Pen pen = new Pen(accentC, thickness))
+                float sweep = SafeSweep(app / total * 360.0);
+                if (sweep > 0.1f)
                 {
-                    pen.StartCap = System.Drawing.Drawing2D.LineCap.Round;
-                    pen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
-                    g.DrawArc(pen, rect, start, Math.Min(sweep, 359.5f));
+                    try
+                    {
+                        using (Pen pen = new Pen(accentC, thickness))
+                        {
+                            pen.StartCap = System.Drawing.Drawing2D.LineCap.Round;
+                            pen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                            g.DrawArc(pen, rect, start, sweep);
+                        }
+                    }
+                    catch { }
                 }
             }
 

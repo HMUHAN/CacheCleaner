@@ -1,11 +1,11 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
-  <assemblyIdentity version="1.3.3.0" name="QQCacheTray.app" type="win32" />
+  <assemblyIdentity version="1.3.4.0" name="QQCacheTray.app" type="win32" />
 
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
       <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
-        <!-- 启动即请求管理员权限：双击 exe 会直接弹 UAC，不用再借道 cmd -->
+        <!-- 鍚姩鍗宠姹傜鐞嗗憳鏉冮檺锛氬弻鍑?exe 浼氱洿鎺ュ脊 UAC锛屼笉鐢ㄥ啀鍊熼亾 cmd -->
         <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
       </requestedPrivileges>
     </security>
