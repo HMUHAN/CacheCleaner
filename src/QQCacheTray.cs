@@ -21,7 +21,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("QQ 缓存管家")]
 [assembly: System.Reflection.AssemblyDescription("定时清理 QQ 本地聊天缓存")]
-[assembly: System.Reflection.AssemblyVersion("1.2.9.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.10.0")]
 
 namespace QQCacheTray
 {
@@ -29,6 +29,58 @@ namespace QQCacheTray
     {
         internal static bool SettingsOnStart;
         internal static bool UpdateOnStart;
+
+        // 只在测试时用：不走界面，直接下载并替换，方便自动化验证
+        private static int RunSelfUpdateOnce()
+        {
+            try
+            {
+                Logger.EnsureDir();
+                Config cfg = Config.Load();
+
+                string used = cfg.UpdateUrl;
+                string lastErr = "";
+                UpdateChecker.Info info = string.IsNullOrEmpty(cfg.UpdateUrl)
+                    ? UpdateChecker.FetchAny(out used, out lastErr)
+                    : UpdateChecker.Fetch(cfg.UpdateUrl);
+                if (info == null)
+                {
+                    Logger.Log("update-now: 清单获取失败 " + lastErr);
+                    return 2;
+                }
+
+                Logger.Log("update-now: 远端 " + info.Version + " 当前 " + UpdateChecker.CurrentVersion +
+                           " 来源 " + used);
+                if (!UpdateChecker.IsNewer(info.Version))
+                {
+                    Logger.Log("update-now: 已是最新");
+                    return 0;
+                }
+
+                string err, actual;
+                string file = SelfUpdater.Download(info.Url, info.Sha256, out err, out actual);
+                if (file == null)
+                {
+                    Logger.Log("update-now: 下载失败 " + err);
+                    return 3;
+                }
+
+                string err2;
+                if (!SelfUpdater.Apply(file, info.Sha256, "", out err2))
+                {
+                    Logger.Log("update-now: 替换失败 " + err2);
+                    return 4;
+                }
+
+                Logger.Log("update-now: 已启动替换程序，主进程退出");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("update-now 异常：" + ex);
+                return 1;
+            }
+        }
 
         [STAThread]
         private static void Main(string[] args)
@@ -51,6 +103,7 @@ namespace QQCacheTray
             bool bootMode = false;
             bool settingsMode = false;
             bool forceUpdate = false;
+            bool updateNow = false;
             foreach (string a in args)
             {
                 if (string.Equals(a, "--boot", StringComparison.OrdinalIgnoreCase)) bootMode = true;
@@ -60,10 +113,17 @@ namespace QQCacheTray
                 if (string.Equals(a, "--diag", StringComparison.OrdinalIgnoreCase)) diag = true;
                 if (string.Equals(a, "--settings", StringComparison.OrdinalIgnoreCase)) settingsMode = true;
                 if (string.Equals(a, "--update", StringComparison.OrdinalIgnoreCase)) forceUpdate = true;
+                if (string.Equals(a, "--update-now", StringComparison.OrdinalIgnoreCase)) updateNow = true;
             }
 
             Program.SettingsOnStart = settingsMode;
             Program.UpdateOnStart = forceUpdate;
+
+            if (updateNow)
+            {
+                Environment.ExitCode = RunSelfUpdateOnce();
+                return;
+            }
 
             if (diag)
             {
@@ -1735,6 +1795,7 @@ namespace QQCacheTray
         private bool _busy;
         private bool _settingsOpen;
         private UpdateChecker.Info _pendingUpdate;
+        private bool _promptOpen;
 
         public TrayContext()
         {
@@ -2259,6 +2320,14 @@ namespace QQCacheTray
 
         private void OpenSettings()
         {
+            // 兜底：设置窗口是模态的，但 ShowDialog 期间消息循环仍在跑，
+            // 托盘双击/菜单可能再次触发，这里必须挡住，否则会嵌套出多个设置窗口
+            if (_settingsOpen)
+            {
+                Logger.Log("设置窗口已打开，忽略重复触发");
+                return;
+            }
+
             TaskbarAlert.Dismiss();
 
             bool updateNow = false;
@@ -2305,6 +2374,11 @@ namespace QQCacheTray
 
         private void ShowUpdatePrompt(UpdateChecker.Info info)
         {
+            // 和设置窗口一样，模态框开着时不要再叠一层
+            if (_promptOpen) return;
+            _promptOpen = true;
+            try
+            {
             bool canSelfUpdate = !string.IsNullOrEmpty(info.Sha256);
             if (!canSelfUpdate) Logger.Log("清单没有 sha256，只提供下载页");
 
@@ -2318,6 +2392,8 @@ namespace QQCacheTray
                     try { Process.Start(info.Url); } catch { }
                 }
             }
+            }
+            finally { _promptOpen = false; }
         }
 
         private void ExitTray()
@@ -3623,11 +3699,21 @@ namespace QQCacheTray
                 {
                     try
                     {
-                        using (WebClient wc = new WebClient())
+                        // WebClient 没有超时，网络卡住会永远挂着；改用 HttpWebRequest 显式设超时
+                        HttpWebRequest dl = (HttpWebRequest)WebRequest.Create(src);
+                        dl.Timeout = 20000;
+                        dl.ReadWriteTimeout = 30000;
+                        dl.UserAgent = "QQCacheTray/" + UpdateChecker.CurrentVersion;
+
+                        using (WebResponse resp = dl.GetResponse())
+                        using (Stream rs = resp.GetResponseStream())
+                        using (FileStream fs = File.Create(tmp))
                         {
-                            wc.Headers.Add("User-Agent", "QQCacheTray/" + UpdateChecker.CurrentVersion);
-                            wc.DownloadFile(src, tmp);
+                            byte[] buf = new byte[65536];
+                            int n;
+                            while ((n = rs.Read(buf, 0, buf.Length)) > 0) fs.Write(buf, 0, n);
                         }
+
                         lastErr = "";
                         break;
                     }
