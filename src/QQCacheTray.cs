@@ -21,7 +21,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("QQ 缓存管家")]
 [assembly: System.Reflection.AssemblyDescription("定时清理 QQ 本地聊天缓存")]
-[assembly: System.Reflection.AssemblyVersion("1.3.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.1.0")]
 
 namespace QQCacheTray
 {
@@ -29,6 +29,7 @@ namespace QQCacheTray
     {
         internal static bool SettingsOnStart;
         internal static int SettingsTab;
+        internal static bool ForceDark;
         internal static bool UpdateOnStart;
 
         // 只在测试时用：不走界面，直接下载并替换，方便自动化验证
@@ -136,6 +137,7 @@ namespace QQCacheTray
                 if (string.Equals(a, "--settings", StringComparison.OrdinalIgnoreCase)) settingsMode = true;
                 if (string.Equals(a, "qq", StringComparison.OrdinalIgnoreCase)) Program.SettingsTab = 1;
                 if (string.Equals(a, "wx", StringComparison.OrdinalIgnoreCase)) Program.SettingsTab = 0;
+                if (string.Equals(a, "--dark", StringComparison.OrdinalIgnoreCase)) Program.ForceDark = true;
                 if (string.Equals(a, "--update", StringComparison.OrdinalIgnoreCase)) forceUpdate = true;
                 if (string.Equals(a, "--update-now", StringComparison.OrdinalIgnoreCase)) updateNow = true;
                 if (string.Equals(a, "--limit-now", StringComparison.OrdinalIgnoreCase)) limitNow = true;
@@ -571,6 +573,10 @@ namespace QQCacheTray
                     Config shot = Config.Load();
                     using (SettingsForm f = new SettingsForm(shot))
                     {
+                        UpdateChecker.Info fake = new UpdateChecker.Info();
+                        fake.Version = "1.3.9"; fake.Url = "http://example.com/a.exe";
+                        fake.Sha256 = "abc"; fake.Notes = "自检用";
+                        f.UpdateInfo = fake;
                         f.Show();
                         Application.DoEvents();
                         System.Threading.Thread.Sleep(300);
@@ -708,6 +714,7 @@ namespace QQCacheTray
         public bool IncludePersonalEmoji = false;
         public bool AutostartEnabled = false;
         public bool UpdateCheck = true;
+        public bool DarkMode = false;
         public string UpdateUrl = "";
         public DateTime LastUpdateCheck = DateTime.MinValue;
         public string QqRoot = "";
@@ -893,6 +900,7 @@ namespace QQCacheTray
                             case "include_personal_emoji": c.IncludePersonalEmoji = ParseBool(val, false); break;
                             case "autostart": c.AutostartEnabled = ParseBool(val, false); break;
                             case "update_check": c.UpdateCheck = ParseBool(val, true); break;
+                            case "dark_mode": c.DarkMode = ParseBool(val, false); break;
                             case "update_url": c.UpdateUrl = val; break;
                             case "last_update_check": c.LastUpdateCheck = ParseDateTime(val); break;
                             case "qq_root": c.QqRoot = val; break;
@@ -960,6 +968,7 @@ namespace QQCacheTray
                 sb.AppendLine("include_personal_emoji=" + (IncludePersonalEmoji ? "1" : "0"));
                 sb.AppendLine("autostart=" + (AutostartEnabled ? "1" : "0"));
                 sb.AppendLine("update_check=" + (UpdateCheck ? "1" : "0"));
+                sb.AppendLine("dark_mode=" + (DarkMode ? "1" : "0"));
                 sb.AppendLine("update_url=" + (UpdateUrl ?? ""));
                 sb.AppendLine("last_update_check=" + (LastUpdateCheck == DateTime.MinValue
                     ? ""
@@ -2666,6 +2675,7 @@ namespace QQCacheTray
         public string CenterText = "";
         public string SubText = "";
         public Color Accent = Color.FromArgb(139, 92, 246);
+        public bool Dark;
 
         private static readonly Color TrackColor = Color.FromArgb(236, 238, 244);
         private static readonly Color OtherColor = Color.FromArgb(196, 181, 253);
@@ -2694,6 +2704,12 @@ namespace QQCacheTray
 
         private void PaintCore(Graphics g)
         {
+            Color track = Dark ? Color.FromArgb(48, 48, 54) : TrackColor;
+            Color otherC = Dark ? Color.FromArgb(76, 63, 122) : OtherColor;
+            Color textC = Dark ? Color.FromArgb(232, 223, 200) : Color.Black;
+            Color subC = Dark ? Color.FromArgb(170, 165, 150) : Color.Gray;
+            Color accentC = Dark ? Color.FromArgb(167, 139, 250) : Accent;
+
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             g.Clear(BackColor);
 
@@ -2703,7 +2719,7 @@ namespace QQCacheTray
 
             Rectangle rect = new Rectangle((Width - d) / 2, 6, d, d);
 
-            using (Pen pen = new Pen(TrackColor, thickness))
+            using (Pen pen = new Pen(track, thickness))
             {
                 pen.StartCap = System.Drawing.Drawing2D.LineCap.Round;
                 pen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
@@ -2719,7 +2735,7 @@ namespace QQCacheTray
             if (other > 0.5)
             {
                 float sweep = (float)(other / total * 360.0);
-                using (Pen pen = new Pen(OtherColor, thickness))
+                using (Pen pen = new Pen(otherC, thickness))
                 {
                     pen.StartCap = System.Drawing.Drawing2D.LineCap.Round;
                     pen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
@@ -2731,7 +2747,7 @@ namespace QQCacheTray
             if (app > 0.5)
             {
                 float sweep = (float)(app / total * 360.0);
-                using (Pen pen = new Pen(Accent, thickness))
+                using (Pen pen = new Pen(accentC, thickness))
                 {
                     pen.StartCap = System.Drawing.Drawing2D.LineCap.Round;
                     pen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
@@ -2747,10 +2763,10 @@ namespace QQCacheTray
                 sf.LineAlignment = StringAlignment.Center;
 
                 RectangleF r1 = new RectangleF(inner.X, inner.Y - 12, inner.Width, inner.Height);
-                g.DrawString(CenterText ?? "", _big, Brushes.Black, r1, sf);
+                using (Brush tb = new SolidBrush(textC)) g.DrawString(CenterText ?? "", _big, tb, r1, sf);
 
                 RectangleF r2 = new RectangleF(inner.X, inner.Y + 26, inner.Width, inner.Height);
-                g.DrawString(SubText ?? "", _small, Brushes.Gray, r2, sf);
+                using (Brush sb = new SolidBrush(subC)) g.DrawString(SubText ?? "", _small, sb, r2, sf);
             }
         }
     }
@@ -2766,6 +2782,8 @@ namespace QQCacheTray
         private AppPanel _wx;
 
         private CheckBox _chkAutoStart;
+        private CheckBox _chkDark;
+        private bool _dark;
         private Label _lblTaskWarn;
         private Panel _updateBar;
         private Label _updateText;
@@ -2819,6 +2837,8 @@ namespace QQCacheTray
             LoadPanel(_wx, cfg);
             LoadPanel(_qq, cfg);
             _chkAutoStart.Checked = AutoStart.IsEnabled();
+            _chkDark.Checked = cfg.DarkMode || Program.ForceDark;
+            ApplyTheme(_chkDark.Checked);
             DetectLegacyTask();
         }
 
@@ -2877,6 +2897,19 @@ namespace QQCacheTray
             TabControl tabs = new TabControl();
             tabs.SetBounds(12, 10, 446, 530);
             tabs.Font = new Font("Microsoft YaHei UI", 9F);
+            tabs.DrawMode = TabDrawMode.OwnerDrawFixed;
+            tabs.DrawItem += delegate(object snd, DrawItemEventArgs de)
+            {
+                TabControl tc = (TabControl)snd;
+                Rectangle r = tc.GetTabRect(de.Index);
+                bool sel = de.Index == tc.SelectedIndex;
+                Color bg = _dark ? (sel ? Color.FromArgb(45, 45, 50) : Color.FromArgb(30, 30, 34))
+                                 : (sel ? Color.White : Color.FromArgb(235, 236, 240));
+                using (Brush b = new SolidBrush(bg)) de.Graphics.FillRectangle(b, r);
+                TextRenderer.DrawText(de.Graphics, tc.TabPages[de.Index].Text, tc.Font, r,
+                    _dark ? DarkText : Color.Black,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            };
             Controls.Add(tabs);
 
             TabPage pageWx = new TabPage("微信");
@@ -2894,8 +2927,14 @@ namespace QQCacheTray
 
             _chkAutoStart = new CheckBox();
             _chkAutoStart.Text = "开机自动启动（登录时请求管理员权限）";
-            _chkAutoStart.SetBounds(18, 548, 430, 24);
+            _chkAutoStart.SetBounds(18, 548, 300, 24);
             Controls.Add(_chkAutoStart);
+
+            _chkDark = new CheckBox();
+            _chkDark.Text = "黑夜模式";
+            _chkDark.SetBounds(330, 548, 110, 24);
+            _chkDark.CheckedChanged += delegate { ApplyTheme(_chkDark.Checked); };
+            Controls.Add(_chkDark);
 
             _lblTaskWarn = new Label();
             _lblTaskWarn.ForeColor = Color.FromArgb(180, 90, 0);
@@ -3246,13 +3285,19 @@ namespace QQCacheTray
             SyncRing(p);
 
             // 选中态
-            p.ModeTimed.BackColor = (!p.LimitMode) ? Color.FromArgb(139, 92, 246) : Color.FromArgb(245, 246, 250);
-            p.ModeTimed.ForeColor = (!p.LimitMode) ? Color.White : Color.Black;
-            p.ModeLimit.BackColor = p.LimitMode ? Color.FromArgb(139, 92, 246) : Color.FromArgb(245, 246, 250);
-            p.ModeLimit.ForeColor = p.LimitMode ? Color.White : Color.Black;
+            Color inactive = _dark ? DarkPanel : Color.FromArgb(245, 246, 250);
+            Color inactiveText = _dark ? DarkText : Color.Black;
+            Color picked = _dark ? Color.FromArgb(88, 66, 160) : Color.FromArgb(233, 226, 255);
 
-            p.ActOld.BackColor = (!p.DeleteAll) ? Color.FromArgb(233, 226, 255) : Color.FromArgb(245, 246, 250);
-            p.ActAll.BackColor = p.DeleteAll ? Color.FromArgb(233, 226, 255) : Color.FromArgb(245, 246, 250);
+            p.ModeTimed.BackColor = (!p.LimitMode) ? Color.FromArgb(139, 92, 246) : inactive;
+            p.ModeTimed.ForeColor = (!p.LimitMode) ? Color.White : inactiveText;
+            p.ModeLimit.BackColor = p.LimitMode ? Color.FromArgb(139, 92, 246) : inactive;
+            p.ModeLimit.ForeColor = p.LimitMode ? Color.White : inactiveText;
+
+            p.ActOld.BackColor = (!p.DeleteAll) ? picked : inactive;
+            p.ActOld.ForeColor = (!p.DeleteAll) ? (_dark ? DarkText : Color.Black) : inactiveText;
+            p.ActAll.BackColor = p.DeleteAll ? picked : inactive;
+            p.ActAll.ForeColor = p.DeleteAll ? (_dark ? DarkText : Color.Black) : inactiveText;
 
             bool timedOn = on && !p.LimitMode;
             bool limitOn = on && p.LimitMode;
@@ -3442,6 +3487,70 @@ namespace QQCacheTray
             catch { }
         }
 
+        private static readonly Color DarkBg = Color.FromArgb(22, 22, 24);
+        private static readonly Color DarkPanel = Color.FromArgb(34, 34, 38);
+        private static readonly Color DarkText = Color.FromArgb(232, 223, 200);
+
+        private void ApplyTheme(bool dark)
+        {
+            _dark = dark;
+            ApplyTo(this, dark);
+
+            if (_wx != null) { _wx.Ring.Dark = dark; _wx.Ring.Invalidate(); }
+            if (_qq != null) { _qq.Ring.Dark = dark; _qq.Ring.Invalidate(); }
+
+            // 分段按钮的选中/未选中配色
+            foreach (AppPanel p in new AppPanel[] { _wx, _qq })
+                if (p != null) UpdatePanel(p);
+
+            BackColor = dark ? DarkBg : Color.FromArgb(246, 247, 250);
+            Invalidate(true);
+        }
+
+        private void ApplyTo(Control c, bool dark)
+        {
+            if (c == null) return;
+            if (ReferenceEquals(c, _updateBar)) return;   // 更新条固定绿色
+            foreach (Control child in c.Controls) ApplyTo(child, dark);
+
+            if (c is Donut)
+            {
+                ((Donut)c).Dark = dark;
+                c.BackColor = dark ? DarkBg : Color.White;
+                return;
+            }
+
+            if (c is TabPage || c is Panel)
+            {
+                c.BackColor = dark ? DarkBg : Color.White;
+                return;
+            }
+
+            if (c is Label || c is CheckBox)
+            {
+                c.ForeColor = dark ? DarkText : Color.Black;
+                c.BackColor = Color.Transparent;
+                return;
+            }
+
+            if (c is Button)
+            {
+                Button b = (Button)c;
+                b.FlatStyle = FlatStyle.Flat;
+                b.BackColor = dark ? DarkPanel : Color.FromArgb(245, 246, 250);
+                b.ForeColor = dark ? DarkText : Color.Black;
+                b.FlatAppearance.BorderColor = dark ? Color.FromArgb(70, 70, 78) : Color.FromArgb(200, 205, 215);
+                return;
+            }
+
+            if (c is TextBox || c is NumericUpDown || c is DateTimePicker)
+            {
+                c.BackColor = dark ? DarkPanel : Color.White;
+                c.ForeColor = dark ? DarkText : Color.Black;
+                return;
+            }
+        }
+
         private void SaveAndClose()
         {
             foreach (AppPanel p in new AppPanel[] { _qq, _wx })
@@ -3462,6 +3571,7 @@ namespace QQCacheTray
             SavePanel(_qq, c);
             SavePanel(_wx, c);
             c.AutostartEnabled = _chkAutoStart.Checked;
+            c.DarkMode = _chkDark.Checked;
 
             // 设的时间已经过去 → 弹“确定 / 立即清理”
             // 只有“0 天 = 当天清理”时，时:分过了才有意义；N≥1 时到期日在未来，不打扰
