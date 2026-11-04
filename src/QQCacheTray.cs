@@ -21,12 +21,15 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("QQ 缓存管家")]
 [assembly: System.Reflection.AssemblyDescription("定时清理 QQ 本地聊天缓存")]
-[assembly: System.Reflection.AssemblyVersion("1.2.8.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.9.0")]
 
 namespace QQCacheTray
 {
     internal static class Program
     {
+        internal static bool SettingsOnStart;
+        internal static bool UpdateOnStart;
+
         [STAThread]
         private static void Main(string[] args)
         {
@@ -46,6 +49,8 @@ namespace QQCacheTray
             bool diag = false;
             bool cleanOnce = false;
             bool bootMode = false;
+            bool settingsMode = false;
+            bool forceUpdate = false;
             foreach (string a in args)
             {
                 if (string.Equals(a, "--boot", StringComparison.OrdinalIgnoreCase)) bootMode = true;
@@ -53,7 +58,12 @@ namespace QQCacheTray
                 if (string.Equals(a, "--selftest", StringComparison.OrdinalIgnoreCase)) selfTest = true;
                 if (string.Equals(a, "--clean", StringComparison.OrdinalIgnoreCase)) cleanOnce = true;
                 if (string.Equals(a, "--diag", StringComparison.OrdinalIgnoreCase)) diag = true;
+                if (string.Equals(a, "--settings", StringComparison.OrdinalIgnoreCase)) settingsMode = true;
+                if (string.Equals(a, "--update", StringComparison.OrdinalIgnoreCase)) forceUpdate = true;
             }
+
+            Program.SettingsOnStart = settingsMode;
+            Program.UpdateOnStart = forceUpdate;
 
             if (diag)
             {
@@ -175,7 +185,11 @@ namespace QQCacheTray
                             ? UpdateChecker.DefaultManifestUrl
                             : cfg.UpdateUrl;
 
-                        UpdateChecker.Info info = UpdateChecker.Fetch(url);
+                        string usedUrl;
+                        string lastErr;
+                        UpdateChecker.Info info = string.IsNullOrEmpty(cfg.UpdateUrl)
+                            ? UpdateChecker.FetchAny(out usedUrl, out lastErr)
+                            : UpdateChecker.Fetch(url);
                         cfg.LastUpdateCheck = DateTime.Now;
                         cfg.Save();
 
@@ -1829,6 +1843,17 @@ namespace QQCacheTray
                 CheckForUpdates(false);
             }
 
+            // 测试用：--settings 直接打开设置窗口，--update 立即检查更新
+            if (Program.SettingsOnStart)
+            {
+                PostToUi(delegate { OpenSettings(); });
+            }
+
+            if (Program.UpdateOnStart)
+            {
+                PostToUi(delegate { CheckForUpdates(true); });
+            }
+
             _icon.ShowBalloonTip(4000, "QQ 缓存管家", "已在后台运行，右键图标可设置自动清理。",
                 ToolTipIcon.Info);
 
@@ -2072,7 +2097,21 @@ namespace QQCacheTray
                 UpdateChecker.Info info = null;
                 string err = null;
 
-                try { info = UpdateChecker.Fetch(url); }
+                try
+                {
+                    if (string.IsNullOrEmpty(_cfg.UpdateUrl))
+                    {
+                        string used;
+                        string lastErr;
+                        info = UpdateChecker.FetchAny(out used, out lastErr);
+                        if (info != null) Logger.Log("清单来源：" + used);
+                        else err = lastErr;
+                    }
+                    else
+                    {
+                        info = UpdateChecker.Fetch(url);
+                    }
+                }
                 catch (Exception ex) { err = ex.Message; }
 
                 Logger.Log(info == null
@@ -2124,6 +2163,7 @@ namespace QQCacheTray
                     delay.Interval = 1500;
                     delay.Tick += delegate
                     {
+                        Logger.Log("任务栏提醒：定时器触发");
                         delay.Stop();
                         delay.Dispose();
                         TaskbarAlert.OnOpen = delegate { OpenSettings(); };
@@ -3317,23 +3357,41 @@ namespace QQCacheTray
         }
 
         private DateTime _shownAt = DateTime.MinValue;
+        private bool _ready;
 
         private TaskbarAlert(string title)
         {
             Text = title;
             ShowInTaskbar = true;
             ShowIcon = false;
-            FormBorderStyle = FormBorderStyle.FixedToolWindow;
-            WindowState = FormWindowState.Minimized;
+            FormBorderStyle = FormBorderStyle.None;   // 工具窗口不会出现在任务栏
+            WindowState = FormWindowState.Normal;
             StartPosition = FormStartPosition.Manual;
-            Location = new Point(-4000, -4000);
-            Size = new Size(200, 100);
+            Location = new Point(-3200, -3200);       // 放在屏幕外，只在任务栏留一个按钮
+            Size = new Size(180, 40);
+            Opacity = 0.01;
+        }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x08000000;   // WS_EX_NOACTIVATE：别抢焦点
+                return cp;
+            }
         }
 
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
             _shownAt = DateTime.Now;
+            _ready = true;
+
+            Logger.Log(string.Format("任务栏提醒：visible={0} taskbar={1} state={2}",
+                Visible, ShowInTaskbar, WindowState));
             Flash();
         }
 
@@ -3356,6 +3414,9 @@ namespace QQCacheTray
         {
             base.OnActivated(e);
 
+            // 首次显示会先触发 Activated（此时 OnShown 还没跑），必须忽略
+            if (!_ready) return;
+
             // 刚弹出来时的自动激活不算点击；最小化状态下的激活也不算
             if ((DateTime.Now - _shownAt).TotalMilliseconds < 2000) return;
             if (WindowState == FormWindowState.Minimized) return;
@@ -3374,6 +3435,7 @@ namespace QQCacheTray
         {
             try
             {
+                Logger.Log("任务栏提醒：开始显示");
                 if (_instance != null && !_instance.IsDisposed)
                 {
                     _instance.Text = title;
@@ -3383,6 +3445,7 @@ namespace QQCacheTray
 
                 _instance = new TaskbarAlert(title);
                 _instance.Show();
+                Logger.Log("任务栏提醒：Show 返回，handle=" + _instance.Handle);
 
                 // 60 秒没人理就自己收掉，别在任务栏留一个孤儿按钮
                 System.Windows.Forms.Timer t = new System.Windows.Forms.Timer();
@@ -3390,7 +3453,10 @@ namespace QQCacheTray
                 t.Tick += delegate { t.Stop(); t.Dispose(); Dismiss(); };
                 t.Start();
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Logger.Log("任务栏提醒失败：" + ex.Message);
+            }
         }
 
         public static void Dismiss()
@@ -3410,6 +3476,53 @@ namespace QQCacheTray
         // 改成你自己的仓库；也可以在 config.ini 里用 update_url= 覆盖
         public const string DefaultManifestUrl =
             "https://raw.githubusercontent.com/HMUHAN/CacheCleaner/main/latest.json";
+
+        // 依次尝试：官方 → 加速代理 → 镜像（jsDelivr 缓存较久，放最后兜底）
+        public static readonly string[] ManifestSources = new string[]
+        {
+            DefaultManifestUrl,
+            "https://ghproxy.net/" + DefaultManifestUrl,
+            "https://raw.gitmirror.com/HMUHAN/CacheCleaner/main/latest.json",
+            "https://cdn.jsdelivr.net/gh/HMUHAN/CacheCleaner@main/latest.json"
+        };
+
+        // 下载 exe 的候选地址（GitHub 不通时走代理）
+        public static string[] DownloadSources(string url)
+        {
+            System.Collections.Generic.List<string> list = new System.Collections.Generic.List<string>();
+            list.Add(url);
+
+            if (url.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase))
+            {
+                list.Add("https://ghproxy.net/" + url);
+                list.Add("https://gh-proxy.com/" + url);
+            }
+
+            return list.ToArray();
+        }
+
+        // 逐个源尝试，全部失败才返回 null
+        public static Info FetchAny(out string usedUrl, out string lastError)
+        {
+            usedUrl = "";
+            lastError = "";
+
+            foreach (string src in ManifestSources)
+            {
+                try
+                {
+                    Info info = Fetch(src);
+                    if (info != null) { usedUrl = src; return info; }
+                    lastError = "清单内容不完整";
+                }
+                catch (Exception ex)
+                {
+                    lastError = ex.Message;
+                }
+            }
+
+            return null;
+        }
 
         public static Version CurrentVersion
         {
@@ -3504,11 +3617,27 @@ namespace QQCacheTray
 
             try
             {
-                using (WebClient wc = new WebClient())
+                string lastErr = "";
+
+                foreach (string src in UpdateChecker.DownloadSources(url))
                 {
-                    wc.Headers.Add("User-Agent", "QQCacheTray/" + UpdateChecker.CurrentVersion);
-                    wc.DownloadFile(url, tmp);
+                    try
+                    {
+                        using (WebClient wc = new WebClient())
+                        {
+                            wc.Headers.Add("User-Agent", "QQCacheTray/" + UpdateChecker.CurrentVersion);
+                            wc.DownloadFile(src, tmp);
+                        }
+                        lastErr = "";
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        lastErr = ex.Message;
+                    }
                 }
+
+                if (!string.IsNullOrEmpty(lastErr)) throw new Exception(lastErr);
 
                 actualSha = Sha256(tmp);
 
