@@ -31,6 +31,7 @@ namespace QQCacheTray
         internal static int SettingsTab;
         internal static bool ForceDark;
         internal static bool UpdateOnStart;
+        internal static string PendingToast = "";
 
         // 只在测试时用：不走界面，直接下载并替换，方便自动化验证
         private static int RunSelfUpdateOnce()
@@ -248,22 +249,31 @@ namespace QQCacheTray
                 Logger.Log("开机检查：定时清理未开启，只检查是否到期");
 
                 bool did = false;
+                string bootMsg = "";
 
                 if (cfg.Enabled && cfg.LimitEnabled)
                 {
                     Logger.Log("开机检查：QQ 容量上限");
-                    Cleaner.EnforceLimit(cfg, false, Logger.Log);
+                    CleanResult lq = Cleaner.EnforceLimit(cfg, false, Logger.Log);
+                    if (lq != null && lq.TotalDeleted > 0)
+                        bootMsg += string.Format("QQ：已清理 {0} 个文件，释放 {1}\n", lq.TotalDeleted, Cleaner.FormatSize(lq.TotalFreed));
                     did = true;
                 }
 
                 if (cfg.WxEnabled && cfg.WxLimitEnabled)
                 {
                     Logger.Log("开机检查：微信容量上限");
-                    Cleaner.EnforceLimit(cfg, true, Logger.Log);
+                    CleanResult lw = Cleaner.EnforceLimit(cfg, true, Logger.Log);
+                    if (lw != null && lw.TotalDeleted > 0)
+                        bootMsg += string.Format("微信：已清理 {0} 个文件，释放 {1}\n", lw.TotalDeleted, Cleaner.FormatSize(lw.TotalFreed));
                     did = true;
                 }
 
-                if (cfg.LimitEnabled || cfg.WxLimitEnabled) return 0;
+                if (cfg.LimitEnabled || cfg.WxLimitEnabled)
+                {
+                    if (bootMsg.Length > 0) Program.PendingToast = bootMsg.TrimEnd('\n');
+                    return 0;
+                }
 
                 if (Cleaner.IsDueNow(cfg))
                 {
@@ -617,9 +627,16 @@ namespace QQCacheTray
                 }
                 catch (Exception ex) { sb.AppendLine("设置界面截图失败：" + ex.Message); }
 
-                sb.AppendLine("RESULT: OK");
+                string body = sb.ToString();
+                int failCount = 0;
+                foreach (string line in body.Split('\n'))
+                    if (line.IndexOf("FAIL", StringComparison.Ordinal) >= 0) failCount++;
+
+                if (failCount == 0) sb.AppendLine("RESULT: OK");
+                else sb.AppendLine("RESULT: FAIL(" + failCount + ")");
+
                 File.WriteAllText(Path.Combine(Config.Dir, "selftest-report.txt"), sb.ToString(), Encoding.UTF8);
-                return 0;
+                return failCount == 0 ? 0 : 1;
             }
             catch (Exception ex)
             {
@@ -2188,6 +2205,13 @@ namespace QQCacheTray
             _icon.ShowBalloonTip(4000, "QQ 缓存管家", "已在后台运行，右键图标可设置自动清理。",
                 ToolTipIcon.Info);
 
+            if (!string.IsNullOrEmpty(Program.PendingToast))
+            {
+                string bootToast = Program.PendingToast;
+                Program.PendingToast = "";
+                PostToUi(delegate { Toast.ShowToast(bootToast); });
+            }
+
             // 首次运行把设置窗口弹出来，免得用户找不到托盘图标以为没启动
             bool restricted = Config.IsRestricted;
             if (restricted)
@@ -2306,8 +2330,25 @@ namespace QQCacheTray
                 _limitTick = 0;
                 try
                 {
-                    if (_cfg.Enabled && _cfg.LimitEnabled) Cleaner.EnforceLimit(_cfg, false, Logger.Log);
-                    if (_cfg.WxEnabled && _cfg.WxLimitEnabled) Cleaner.EnforceLimit(_cfg, true, Logger.Log);
+                    string limitMsg = "";
+                    if (_cfg.Enabled && _cfg.LimitEnabled)
+                    {
+                        CleanResult lq = Cleaner.EnforceLimit(_cfg, false, Logger.Log);
+                        if (lq != null && lq.TotalDeleted > 0)
+                            limitMsg += string.Format("QQ：已清理 {0} 个文件，释放 {1}\n", lq.TotalDeleted, Cleaner.FormatSize(lq.TotalFreed));
+                    }
+                    if (_cfg.WxEnabled && _cfg.WxLimitEnabled)
+                    {
+                        CleanResult lw = Cleaner.EnforceLimit(_cfg, true, Logger.Log);
+                        if (lw != null && lw.TotalDeleted > 0)
+                            limitMsg += string.Format("微信：已清理 {0} 个文件，释放 {1}\n", lw.TotalDeleted, Cleaner.FormatSize(lw.TotalFreed));
+                    }
+
+                    if (limitMsg.Length > 0)
+                    {
+                        string shown = limitMsg.TrimEnd('\n');
+                        PostToUi(delegate { Toast.ShowToast(shown); });
+                    }
                 }
                 catch (Exception ex) { Logger.Log("容量上限检查失败：" + ex.Message); }
             }
@@ -2929,7 +2970,7 @@ namespace QQCacheTray
             DrawArrow(g, _upRect, true, arrow);
             DrawArrow(g, _downRect, false, arrow);
 
-            if (_edit != null)
+            if (_edit != null && (_edit.BackColor != bg || _edit.ForeColor != text))
             {
                 _edit.BackColor = bg;
                 _edit.ForeColor = text;
@@ -3064,6 +3105,18 @@ namespace QQCacheTray
             DetectLegacyTask();
         }
 
+        // WS_EX_COMPOSITED：让整个窗口（含所有子控件）离屏合成后再一次性显示，
+        // 多控件主题切换时不会出现半新半旧的中间帧
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x02000000;
+                return cp;
+            }
+        }
+
         private System.Windows.Forms.Timer _tick;
 
         protected override void OnShown(EventArgs e)
@@ -3108,6 +3161,7 @@ namespace QQCacheTray
             Text = "缓存清理 - 设置";
             Icon = IconFactory.Create(32);
             Font = new Font("Microsoft YaHei UI", 9F);
+            DoubleBuffered = true;
             ClientSize = new Size(470, 700);
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -3671,6 +3725,16 @@ namespace QQCacheTray
                 tmp.Save();
             }
 
+            string msg;
+            if (!string.IsNullOrEmpty(r.Error))
+                msg = "清理失败：" + r.Error;
+            else if (r.TotalDeleted == 0)
+                msg = (p.IsWx ? "微信" : "QQ") + "：没有需要清理的文件";
+            else
+                msg = string.Format("{0}：已清理 {1} 个文件，释放 {2}",
+                    p.IsWx ? "微信" : "QQ", r.TotalDeleted, Cleaner.FormatSize(r.TotalFreed));
+
+            Toast.ShowToast(msg);
             RefreshSize(p);
         }
 
@@ -3745,25 +3809,62 @@ namespace QQCacheTray
             catch { }
         }
 
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
+
+        private const int WM_SETREDRAW = 0x000B;
+
+        // 整棵控件树关/开重绘：主题切换时先关，改完颜色再一次性刷出来
+        // 让整棵控件树都失效，配合 RedrawWindow 一次性重画
+        private static void InvalidateTree(Control c)
+        {
+            if (c == null) return;
+            c.Invalidate();
+            foreach (Control child in c.Controls) InvalidateTree(child);
+        }
+
+        private static void SetRedrawTree(Control c, bool enabled)
+        {
+            if (c == null) return;
+            if (c.IsHandleCreated)
+                SendMessage(c.Handle, WM_SETREDRAW, enabled ? new IntPtr(1) : IntPtr.Zero, IntPtr.Zero);
+            foreach (Control child in c.Controls) SetRedrawTree(child, enabled);
+        }
+
         private static readonly Color DarkBg = Color.FromArgb(22, 22, 24);
         private static readonly Color DarkPanel = Color.FromArgb(34, 34, 38);
         private static readonly Color DarkText = Color.FromArgb(232, 223, 200);
 
         private void ApplyTheme(bool dark)
         {
-            _dark = dark;
-            ApplyTo(this, dark);
+            SetRedrawTree(this, false);
+            try
+            {
+                _dark = dark;
+                ApplyTo(this, dark);
 
-            if (_wx != null) { _wx.Ring.Dark = dark; _wx.Ring.Invalidate(); }
-            if (_qq != null) { _qq.Ring.Dark = dark; _qq.Ring.Invalidate(); }
+                if (_wx != null) { _wx.Ring.Dark = dark; _wx.Ring.Invalidate(); }
+                if (_qq != null) { _qq.Ring.Dark = dark; _qq.Ring.Invalidate(); }
 
-            // 分段按钮的选中/未选中配色
-            foreach (AppPanel p in new AppPanel[] { _wx, _qq })
-                if (p != null) UpdatePanel(p);
+                // 分段按钮的选中/未选中配色
+                foreach (AppPanel p in new AppPanel[] { _wx, _qq })
+                    if (p != null) UpdatePanel(p);
 
-            SelectTab(_tabIndex);
-            BackColor = dark ? DarkBg : Color.FromArgb(246, 247, 250);
-            Invalidate(true);
+                SelectTab(_tabIndex);
+                BackColor = dark ? DarkBg : Color.FromArgb(246, 247, 250);
+            }
+            finally
+            {
+                SetRedrawTree(this, true);
+                // 让所有控件都失效，再一次性刷出来（一个绘制批次），避免半新半旧的中间帧
+                InvalidateTree(this);
+                RedrawWindow(this.Handle, IntPtr.Zero, IntPtr.Zero, 0x0001 | 0x0004 | 0x0080 | 0x0100);
+                Invalidate(true);
+                Update();
+            }
         }
 
         private void ApplyTo(Control c, bool dark)
@@ -4875,6 +4976,7 @@ namespace QQCacheTray
                 CreateParams cp = base.CreateParams;
                 cp.ExStyle |= 0x08000000;   // WS_EX_NOACTIVATE
                 cp.ExStyle |= 0x00000080;   // WS_EX_TOOLWINDOW
+                cp.ExStyle |= 0x02000000;   // WS_EX_COMPOSITED：整窗合成后再显示，避免闪
                 return cp;
             }
         }
