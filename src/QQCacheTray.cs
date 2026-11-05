@@ -630,7 +630,12 @@ namespace QQCacheTray
                 string body = sb.ToString();
                 int failCount = 0;
                 foreach (string line in body.Split('\n'))
+                {
                     if (line.IndexOf("FAIL", StringComparison.Ordinal) >= 0) failCount++;
+                    else if (line.IndexOf("OUT_OF_BOUNDS", StringComparison.Ordinal) >= 0) failCount++;
+                    else if (line.IndexOf("DIALOG_OVERFLOW", StringComparison.Ordinal) >= 0) failCount++;
+                    else if (line.IndexOf(" OVERLAP", StringComparison.Ordinal) >= 0) failCount++;
+                }
 
                 if (failCount == 0) sb.AppendLine("RESULT: OK");
                 else sb.AppendLine("RESULT: FAIL(" + failCount + ")");
@@ -3253,13 +3258,13 @@ namespace QQCacheTray
 
             _lblTaskWarn = new Label();
             _lblTaskWarn.ForeColor = Color.FromArgb(180, 90, 0);
-            _lblTaskWarn.SetBounds(16, 572, 438, 32);
+            _lblTaskWarn.SetBounds(16, 618, 438, 32);
             _lblTaskWarn.Visible = false;
             Controls.Add(_lblTaskWarn);
 
             _btnKillTask = new Button();
             _btnKillTask.Text = "停用旧的计划任务";
-            _btnKillTask.SetBounds(16, 604, 150, 26);
+            _btnKillTask.SetBounds(16, 656, 150, 26);
             _btnKillTask.Visible = false;
             _btnKillTask.Click += delegate { KillLegacyTask(); };
             Controls.Add(_btnKillTask);
@@ -3370,7 +3375,7 @@ namespace QQCacheTray
 
             p.ScheduleOn = new FlatCheck();
             p.ScheduleOn.Text = "开启（不勾选：开机只检查一次后退出）";
-            p.ScheduleOn.SetBounds(214, 232, 234, 24);
+            p.ScheduleOn.SetBounds(212, 232, 232, 24);
             p.ScheduleOn.CheckedChanged += delegate { UpdatePanel(p); };
             page.Controls.Add(p.ScheduleOn);
 
@@ -3849,7 +3854,7 @@ namespace QQCacheTray
         private void BuildUpdateBar()
         {
             _updateBar = new Panel();
-            _updateBar.SetBounds(16, 566, 438, 32);
+            _updateBar.SetBounds(16, 580, 438, 32);
             _updateBar.Visible = false;
             _updateBar.BorderStyle = BorderStyle.FixedSingle;
             _updateBar.BackColor = Color.FromArgb(223, 246, 221);   // 浅绿
