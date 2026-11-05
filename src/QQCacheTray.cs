@@ -21,7 +21,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("QQ 缓存管家")]
 [assembly: System.Reflection.AssemblyDescription("定时清理 QQ 本地聊天缓存")]
-[assembly: System.Reflection.AssemblyVersion("1.3.4.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.5.0")]
 
 namespace QQCacheTray
 {
@@ -1280,7 +1280,7 @@ namespace QQCacheTray
         private static List<CacheFile> CollectCacheFiles(Config cfg, bool wx, Action<string> log)
         {
             List<CacheFile> list = new List<CacheFile>();
-            List<string> scanned = new List<string>();
+            List<FileInfo> scanned = new List<FileInfo>();
             Action<string> sink = log ?? Silently;
 
             if (!wx)
@@ -1295,19 +1295,14 @@ namespace QQCacheTray
                         scanned.Clear();
                         Walk(catPath, scanned, sink, 0);
 
-                        foreach (string f in scanned)
+                        foreach (FileInfo fi in scanned)
                         {
+                            string f = fi.FullName;
                             string rel = f.Substring(catPath.Length).TrimStart('\\');
                             if (IsExcluded(rel, cfg, cat)) continue;
-                            try
-                            {
-                                FileInfo fi = new FileInfo(f);
-                                if (!fi.Exists) continue;
-                                CacheFile c = new CacheFile();
-                                c.Path = f; c.Length = fi.Length; c.Time = fi.LastWriteTime;
-                                list.Add(c);
-                            }
-                            catch { }
+                            CacheFile c = new CacheFile();
+                            c.Path = f; c.Length = fi.Length; c.Time = fi.LastWriteTime;
+                            list.Add(c);
                         }
                     }
                 }
@@ -1321,17 +1316,11 @@ namespace QQCacheTray
                     scanned.Clear();
                     Walk(kv.Value, scanned, sink, 0);
 
-                    foreach (string f in scanned)
+                    foreach (FileInfo fi in scanned)
                     {
-                        try
-                        {
-                            FileInfo fi = new FileInfo(f);
-                            if (!fi.Exists) continue;
-                            CacheFile c = new CacheFile();
-                            c.Path = f; c.Length = fi.Length; c.Time = fi.LastWriteTime;
-                            list.Add(c);
-                        }
-                        catch { }
+                        CacheFile c = new CacheFile();
+                        c.Path = fi.FullName; c.Length = fi.Length; c.Time = fi.LastWriteTime;
+                        list.Add(c);
                     }
                 }
             }
@@ -1359,11 +1348,65 @@ namespace QQCacheTray
             return null;
         }
 
+        // 只统计大小：边遍历边累加，不构造 CacheFile 列表
+        private static long SumDir(string dir, Config cfg, string cat, string catPath, Action<string> log, int depth)
+        {
+            if (depth > 10) return 0;
+            long sum = 0;
+            try
+            {
+                foreach (FileInfo fi in new DirectoryInfo(dir).GetFiles())
+                {
+                    string rel = fi.FullName.Substring(catPath.Length).TrimStart('\\');
+                    if (IsExcluded(rel, cfg, cat)) continue;
+                    sum += fi.Length;
+                }
+            }
+            catch { return sum; }
+
+            string[] subs;
+            try { subs = Directory.GetDirectories(dir); }
+            catch { return sum; }
+
+            foreach (string d in subs)
+            {
+                try
+                {
+                    if ((File.GetAttributes(d) & FileAttributes.ReparsePoint) != 0) continue;
+                }
+                catch { continue; }
+                sum += SumDir(d, cfg, cat, catPath, log, depth + 1);
+            }
+            return sum;
+        }
+
         // 缓存占用（字节）
         public static long MeasureCache(Config cfg, bool wx, Action<string> log)
         {
+            Action<string> sink = log ?? Silently;
             long total = 0;
-            foreach (CacheFile f in CollectCacheFiles(cfg, wx, log)) total += f.Length;
+
+            if (!wx)
+            {
+                foreach (string ntData in GetNtDataDirs(cfg, sink))
+                {
+                    foreach (string cat in cfg.Categories())
+                    {
+                        string catPath = Path.Combine(ntData, cat);
+                        if (!Directory.Exists(catPath)) continue;
+                        total += SumDir(catPath, cfg, cat, catPath, sink, 0);
+                    }
+                }
+            }
+            else
+            {
+                foreach (KeyValuePair<string, string> kv in GetWxCategoryDirs(cfg, sink))
+                {
+                    if (!Directory.Exists(kv.Value)) continue;
+                    total += SumDir(kv.Value, cfg, "Wx", kv.Value, sink, 0);
+                }
+            }
+
             return total;
         }
 
@@ -1578,20 +1621,20 @@ namespace QQCacheTray
                     st.Account = account;
                     st.Category = cat;
 
-                    List<string> files = new List<string>();
+                    List<FileInfo> files = new List<FileInfo>();
                     Walk(catPath, files, log, 0);
 
-                    foreach (string f in files)
+                    foreach (FileInfo fi in files)
                     {
                         st.Scanned++;
+                        string f = fi.FullName;
                         string rel = f.Substring(catPath.Length).TrimStart('\\');
                         if (IsExcluded(rel, cfg, cat)) { st.Skipped++; continue; }
 
-                        long len = 0;
+                        long len;
                         DateTime mtime;
                         try
                         {
-                            FileInfo fi = new FileInfo(f);
                             len = fi.Length;
                             mtime = fi.LastWriteTime;
                         }
@@ -1822,17 +1865,17 @@ namespace QQCacheTray
                 st.Account = account;
                 st.Category = cat;
 
-                List<string> files = new List<string>();
+                List<FileInfo> files = new List<FileInfo>();
                 Walk(catPath, files, log, 0);
 
-                foreach (string f in files)
+                foreach (FileInfo fi in files)
                 {
                     st.Scanned++;
-                    long len = 0;
+                    string f = fi.FullName;
+                    long len;
                     DateTime mtime;
                     try
                     {
-                        FileInfo fi = new FileInfo(f);
                         len = fi.Length;
                         mtime = fi.LastWriteTime;
                     }
@@ -1976,22 +2019,23 @@ namespace QQCacheTray
         private static long Measure(string dir)
         {
             long sum = 0;
-            List<string> files = new List<string>();
+            List<FileInfo> files = new List<FileInfo>();
             Walk(dir, files, delegate { }, 0);
-            foreach (string f in files)
+            foreach (FileInfo fi in files)
             {
-                try { sum += new FileInfo(f).Length; }
+                try { sum += fi.Length; }
                 catch { }
             }
             return sum;
         }
 
-        private static void Walk(string dir, List<string> acc, Action<string> log, int depth)
+        private static void Walk(string dir, List<FileInfo> acc, Action<string> log, int depth)
         {
             if (depth > 10) return;
             try
             {
-                foreach (string f in Directory.GetFiles(dir)) acc.Add(f);
+                // 直接用 DirectoryInfo 取 FileInfo：长度和时间已经带回来了，调用方不用再 stat 一次
+                foreach (FileInfo f in new DirectoryInfo(dir).GetFiles()) acc.Add(f);
             }
             catch (Exception ex)
             {
@@ -3123,12 +3167,11 @@ namespace QQCacheTray
         {
             base.OnShown(e);
 
-            // 窗口有句柄之后才能安全地跨线程更新，也才有可用的目录信息
-            foreach (AppPanel p in new AppPanel[] { _wx, _qq })
-            {
-                RefreshSize(p);
-                UpdateCountdown(p);
-            }
+            // 只统计当前可见的标签页，另一个等切过去再算（大缓存时打开窗口秒开）
+            MarkDirtyAll();
+            EnsureMeasured(_tabIndex == 0 ? _wx : _qq);
+            UpdateCountdown(_wx);
+            UpdateCountdown(_qq);
 
             _tick = new System.Windows.Forms.Timer();
             _tick.Interval = 20000;   // 20 秒刷一次，显示精确到分钟
@@ -3251,6 +3294,8 @@ namespace QQCacheTray
 
             StyleTab(_tabWx, idx == 0);
             StyleTab(_tabQq, idx == 1);
+
+            EnsureMeasured(idx == 0 ? _wx : _qq);   // 第一次切到这个标签时补算大小
         }
 
         private void StyleTab(Button b, bool active)
@@ -3456,7 +3501,7 @@ namespace QQCacheTray
             p.Countdown.ForeColor = Color.FromArgb(0, 100, 180);
             page.Controls.Add(p.Countdown);
 
-            p.Size = MakeLabel("当前占用：统计中…", 8, 478, 232, 18);
+            p.Size = MakeLabel("当前占用：—", 8, 478, 232, 18);
             page.Controls.Add(p.Size);
 
             p.CleanNow = MakeSeg("立即清理", 246, 472, 100);
@@ -3655,25 +3700,74 @@ namespace QQCacheTray
             p.Countdown.Text = cd;
         }
 
+        // ---- 缓存统计：后台线程跑，避免大缓存时设置窗口卡住 ----
+        private readonly Dictionary<AppPanel, int> _refreshGen = new Dictionary<AppPanel, int>();
+        private bool _wxMeasured, _qqMeasured;
+
+        private void MarkDirtyAll()
+        {
+            _wxMeasured = false;
+            _qqMeasured = false;
+        }
+
+        private void EnsureMeasured(AppPanel p)
+        {
+            if (p == null) return;
+            if (!(p.IsWx ? _wxMeasured : _qqMeasured)) RefreshSize(p);
+        }
+
         private void RefreshSize(AppPanel p)
         {
+            if (p == null) return;
+
             Config tmp = new Config();
             SavePanel(p, tmp);
 
-            long cache = 0;
-            try { cache = Cleaner.MeasureCache(tmp, p.IsWx, null); } catch { }
+            if (p.IsWx) _wxMeasured = true; else _qqMeasured = true;
 
-            string root = Cleaner.PrimaryRoot(tmp, p.IsWx);
-            long total = 0, free = 0;
-            try
+            int gen;
+            if (!_refreshGen.TryGetValue(p, out gen)) gen = 0;
+            gen++;
+            _refreshGen[p] = gen;
+
+            p.Size.Text = "当前占用：统计中…";
+            p.Rescan.Enabled = false;
+
+            bool isWx = p.IsWx;
+            ThreadPool.QueueUserWorkItem(delegate
             {
-                string drive = string.IsNullOrEmpty(root) ? "C:" : Path.GetPathRoot(root);
-                DriveInfo di = new DriveInfo(drive);
-                total = di.TotalSize;
-                free = di.AvailableFreeSpace;
-            }
-            catch { }
+                long cache = 0;
+                try { cache = Cleaner.MeasureCache(tmp, isWx, null); } catch { }
 
+                string root = "";
+                try { root = Cleaner.PrimaryRoot(tmp, isWx); } catch { }
+
+                long total = 0, free = 0;
+                try
+                {
+                    string drive = string.IsNullOrEmpty(root) ? "C:" : Path.GetPathRoot(root);
+                    DriveInfo di = new DriveInfo(drive);
+                    total = di.TotalSize;
+                    free = di.AvailableFreeSpace;
+                }
+                catch { }
+
+                try
+                {
+                    BeginInvoke((Action)delegate
+                    {
+                        int cur;
+                        if (!_refreshGen.TryGetValue(p, out cur) || cur != gen) return;   // 已有更新的一次统计
+                        p.Rescan.Enabled = true;
+                        ApplySize(p, cache, root, total, free);
+                    });
+                }
+                catch { }
+            });
+        }
+
+        private void ApplySize(AppPanel p, long cache, string root, long total, long free)
+        {
             if (total <= 0) total = 1;
 
             p.Ring.TotalBytes = total;
@@ -3735,6 +3829,7 @@ namespace QQCacheTray
                     p.IsWx ? "微信" : "QQ", r.TotalDeleted, Cleaner.FormatSize(r.TotalFreed));
 
             Toast.ShowToast(msg);
+            MarkDirtyAll();
             RefreshSize(p);
         }
 
