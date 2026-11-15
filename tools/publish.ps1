@@ -46,7 +46,8 @@ $src = Join-Path $root 'src\QQCacheTray.cs'
 $text = Get-Content $src -Raw -Encoding UTF8
 $text = $text -replace 'https://raw\.githubusercontent\.com/[^/]+/[^/]+/main/latest\.json',
                         "https://raw.githubusercontent.com/$User/$Repo/main/latest.json"
-Set-Content -Path $src -Value $text -Encoding UTF8 -NoNewline
+# 不要写 UTF-8 BOM：check-release 按正文比较，BOM 会被当成差异
+[IO.File]::WriteAllText($src, $text, (New-Object System.Text.UTF8Encoding($false)))
 Write-Host "   manifest -> https://raw.githubusercontent.com/$User/$Repo/main/latest.json"
 
 Write-Host "== 2) 初始化 / 关联远端 ==" -ForegroundColor Cyan

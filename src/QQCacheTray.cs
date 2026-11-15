@@ -1,4 +1,4 @@
-﻿// QQ 缓存管家 - 托盘小工具
+// QQ 缓存管家 - 托盘小工具
 // 单文件 C# / .NET Framework 4.x / WinForms，用 csc 编译成 exe
 // 功能：托盘常驻 + 设置面板 + 每 N 天自动清理 QQ（NT 版）图片/视频/表情/语音缓存
 
@@ -21,7 +21,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("QQ 缓存管家")]
 [assembly: System.Reflection.AssemblyDescription("定时清理 QQ 本地聊天缓存")]
-[assembly: System.Reflection.AssemblyVersion("1.3.5.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.6.0")]
 
 namespace QQCacheTray
 {
@@ -604,6 +604,148 @@ namespace QQCacheTray
                         sb.AppendLine("UPD_CTRL: " + c.GetType().Name + " text=[" + c.Text + "] bounds=" + c.Bounds);
                 }
 
+                // 容量显示：统计期间不得显示 0 B；切主题不得改数值、不得重新统计
+                try
+                {
+                    string fakeRoot = Path.Combine(Config.Dir, "selftest-cache");
+                    try { if (Directory.Exists(fakeRoot)) Directory.Delete(fakeRoot, true); } catch { }
+                    string fakeNtData = Path.Combine(fakeRoot, "nt_data");
+                    Directory.CreateDirectory(Path.Combine(fakeNtData, "Pic", "2026-11"));
+                    Directory.CreateDirectory(Path.Combine(fakeNtData, "Video"));
+                    string[] fakeFiles = new string[]
+                    {
+                        Path.Combine(fakeNtData, "Pic", "2026-11", "a.jpg"),
+                        Path.Combine(fakeNtData, "Pic", "2026-11", "b.jpg"),
+                        Path.Combine(fakeNtData, "Video", "c.mp4")
+                    };
+                    long expect = 0;
+                    foreach (string f in fakeFiles)
+                    {
+                        using (FileStream fs = File.Create(f)) fs.SetLength(1024 * 1024);
+                        expect += 1024 * 1024;
+                    }
+
+                    Config fakeCfg = new Config();
+                    fakeCfg.QqRoot = fakeNtData;   // 手动指定根目录，统计只读这棵假目录，不碰真实缓存
+
+                    bool noEarlyScan, gotValue, darkKeep;
+                    string pendingRing = "";
+                    string actualRing = "";
+                    int scanBeforeShow, scanBeforeToggle, scanAfter;
+
+                    using (SettingsForm uf = new SettingsForm(fakeCfg))
+                    {
+                        scanBeforeShow = uf.ScanCountForTest;
+                        noEarlyScan = scanBeforeShow == 0;   // 配置还没装进控件之前不允许统计
+
+                        uf.Show();
+                        Application.DoEvents();
+                        uf.MeasureForTest(false);   // 自检可能停在微信页，这里显式统计 QQ 页
+                        Application.DoEvents();
+
+                        // 统计还在跑的时候，环形图不能给出 0 B 这种假数值
+                        DateTime until = DateTime.Now.AddSeconds(6);
+                        while (DateTime.Now < until)
+                        {
+                            Application.DoEvents();
+                            string sizeText = uf.SizeTextForTest(false);
+                            string ringText = uf.RingTextForTest(false);
+                            if (sizeText.Contains("统计中") && ringText == Cleaner.FormatSize(0))
+                                pendingRing = ringText;
+                            if (!sizeText.Contains("统计中")) break;
+                            System.Threading.Thread.Sleep(10);
+                        }
+
+                        actualRing = uf.RingTextForTest(false);
+                        gotValue = actualRing == Cleaner.FormatSize(expect)
+                                   && uf.DetectTextForTest(false).Contains("nt_data");
+
+                        scanBeforeToggle = uf.ScanCountForTest;
+                        uf.ToggleDarkForTest();   // 勾/取消“黑夜模式”，走真实事件
+                        Application.DoEvents();
+                        scanAfter = uf.ScanCountForTest;
+                        darkKeep = uf.RingTextForTest(false) == Cleaner.FormatSize(expect)
+                                   && scanAfter == scanBeforeToggle;
+
+                        uf.Close();
+                    }
+
+                    try { Directory.Delete(fakeRoot, true); } catch { }
+
+                    bool capOk = noEarlyScan && gotValue && darkKeep && pendingRing.Length == 0;
+                    sb.AppendLine("容量显示测试: " + (capOk ? "PASS" : "FAIL")
+                                  + " 构造期统计次数=" + scanBeforeShow
+                                  + " 数值正确=" + gotValue
+                                  + " 期望=" + Cleaner.FormatSize(expect)
+                                  + " 实际=[" + actualRing + "]"
+                                  + " 统计中误显示=[" + pendingRing + "]"
+                                  + " 切主题前统计次数=" + scanBeforeToggle
+                                  + " 切主题后=" + scanAfter);
+                }
+                catch (Exception ex)
+                {
+                    sb.AppendLine("容量显示测试: FAIL 异常 " + ex.Message);
+                }
+
+                // 容量上限：没超上限时不该把每个文件建成对象（快路径）
+                try
+                {
+                    string fastRoot = Path.Combine(Config.Dir, "selftest-limit");
+                    try { if (Directory.Exists(fastRoot)) Directory.Delete(fastRoot, true); } catch { }
+                    string fastNtData = Path.Combine(fastRoot, "nt_data");
+                    string fastPic = Path.Combine(fastNtData, "Pic");
+                    Directory.CreateDirectory(fastPic);
+                    byte[] oneKb = new byte[1024];
+                    for (int i = 0; i < 4000; i++) File.WriteAllBytes(Path.Combine(fastPic, "x" + i + ".jpg"), oneKb);
+
+                    Config lc = new Config();
+                    lc.QqRoot = fastNtData;
+                    lc.LimitEnabled = true;
+                    lc.LimitMB = 100;                     // 4 MB 远低于 100 MB
+                    CleanResult lr = Cleaner.EnforceLimit(lc, false, null);
+                    int left = 0;
+                    try { left = Directory.GetFiles(fastPic, "*", SearchOption.AllDirectories).Length; } catch { }
+                    bool fastOk = lr.TotalDeleted == 0 && !Cleaner.LastLimitCollectedFiles && left == 4000;
+                    sb.AppendLine("容量上限快路径: " + (fastOk ? "PASS" : "FAIL")
+                                  + " 收集文件列表=" + Cleaner.LastLimitCollectedFiles
+                                  + " 删除=" + lr.TotalDeleted + " 剩余=" + left);
+                    try { Directory.Delete(fastRoot, true); } catch { }
+                }
+                catch (Exception ex) { sb.AppendLine("容量上限快路径: FAIL 异常 " + ex.Message); }
+
+                // 空闲节奏：没事干就别每分钟醒一次
+                try
+                {
+                    DateTime nowTick = DateTime.Now;
+                    Config t0 = new Config(); t0.Enabled = false; t0.WxEnabled = false;
+                    Config t1 = new Config(); t1.Enabled = true; t1.LimitEnabled = true;
+                    Config t2 = new Config(); t2.Enabled = true; t2.AutoCleanEnabled = true;
+                    t2.LastRun = nowTick; t2.IntervalDays = 7;
+                    Config t3 = new Config(); t3.Enabled = true; t3.AutoCleanEnabled = true;
+                    t3.CleanHour = 0; t3.CleanMinute = 0; t3.IntervalDays = 0; t3.LastRun = DateTime.MinValue;
+
+                    int s0 = TrayContext.NextTickSeconds(t0, nowTick);
+                    int s1 = TrayContext.NextTickSeconds(t1, nowTick);
+                    int s2 = TrayContext.NextTickSeconds(t2, nowTick);
+                    int s3 = TrayContext.NextTickSeconds(t3, nowTick);
+                    bool tickOk = s0 == 300 && s1 == 60 && s2 == 300 && s3 == 60;
+                    sb.AppendLine("空闲节奏: " + (tickOk ? "PASS" : "FAIL")
+                                  + " 无任务=" + s0 + " 上限模式=" + s1 + " 七天后=" + s2 + " 已到期=" + s3);
+                }
+                catch (Exception ex) { sb.AppendLine("空闲节奏: FAIL 异常 " + ex.Message); }
+
+                // 上限检查节奏：离上限越远越少扫
+                try
+                {
+                    int m0 = TrayContext.NextLimitMinutes(0.1);
+                    int m1 = TrayContext.NextLimitMinutes(0.5);
+                    int m2 = TrayContext.NextLimitMinutes(0.9);
+                    bool mOk = m0 == 30 && m1 == 10 && m2 == 5;
+                    sb.AppendLine("上限节奏: " + (mOk ? "PASS" : "FAIL")
+                                  + " 10%=" + m0 + " 50%=" + m1 + " 90%=" + m2);
+                }
+                catch (Exception ex) { sb.AppendLine("上限节奏: FAIL 异常 " + ex.Message); }
+
                 try
                 {
                     Config shot = Config.Load();
@@ -761,6 +903,7 @@ namespace QQCacheTray
         public bool IncludeSystemEmoji = false;
         public bool IncludePersonalEmoji = false;
         public bool AutostartEnabled = false;
+        public bool LegacyCleaned = false;   // 旧版计划任务/启动项只清一次，之后不再拉 schtasks
         public bool UpdateCheck = true;
         public bool DarkMode = false;
         public string UpdateUrl = "";
@@ -949,6 +1092,7 @@ namespace QQCacheTray
                             case "include_system_emoji": c.IncludeSystemEmoji = ParseBool(val, false); break;
                             case "include_personal_emoji": c.IncludePersonalEmoji = ParseBool(val, false); break;
                             case "autostart": c.AutostartEnabled = ParseBool(val, false); break;
+                            case "legacy_cleaned": c.LegacyCleaned = ParseBool(val, false); break;
                             case "update_check": c.UpdateCheck = ParseBool(val, true); break;
                             case "dark_mode": c.DarkMode = ParseBool(val, false); break;
                             case "update_url": c.UpdateUrl = val; break;
@@ -1019,6 +1163,7 @@ namespace QQCacheTray
                 sb.AppendLine("include_system_emoji=" + (IncludeSystemEmoji ? "1" : "0"));
                 sb.AppendLine("include_personal_emoji=" + (IncludePersonalEmoji ? "1" : "0"));
                 sb.AppendLine("autostart=" + (AutostartEnabled ? "1" : "0"));
+                sb.AppendLine("legacy_cleaned=" + (LegacyCleaned ? "1" : "0"));
                 sb.AppendLine("update_check=" + (UpdateCheck ? "1" : "0"));
                 sb.AppendLine("dark_mode=" + (DarkMode ? "1" : "0"));
                 sb.AppendLine("update_url=" + (UpdateUrl ?? ""));
@@ -1415,26 +1560,45 @@ namespace QQCacheTray
             return total;
         }
 
+        // 自检用：上一次 EnforceLimit 有没有走“把每个文件都建成对象”的重路径
+        public static bool LastLimitCollectedFiles;
+        // 供托盘决定下次多久再查：上一次实测占用 / 上限
+        public static long LastLimitTotal;
+        public static long LastLimitLimit;
+        private static DateTime _lastLimitIdleLog = DateTime.MinValue;
+
         // 超过上限就清理：删旧文件（保留到 90% 以下）或全删
         public static CleanResult EnforceLimit(Config cfg, bool wx, Action<string> log)
         {
             CleanResult result = new CleanResult();
             Action<string> sink = log ?? Silently;
+            LastLimitCollectedFiles = false;
 
             int limitMB = wx ? cfg.WxLimitMB : cfg.LimitMB;
             bool deleteAll = wx ? cfg.WxLimitDeleteAll : cfg.LimitDeleteAll;
             long limit = Math.Max(100, limitMB) * 1024L * 1024L;
 
-            List<CacheFile> files = CollectCacheFiles(cfg, wx, sink);
-            long total = 0;
-            foreach (CacheFile f in files) total += f.Length;
+            // 先流式求和：没超上限就走人，不要为每个文件建 CacheFile 对象再排序
+            long total = MeasureCache(cfg, wx, sink);
 
             string tag = wx ? "微信" : "QQ";
+            LastLimitTotal = total;
+            LastLimitLimit = limit;
             if (total <= limit)
             {
-                sink(string.Format("{0} 缓存 {1}，未超过上限 {2}", tag, FormatSize(total), FormatSize(limit)));
+                // 每 10 分钟一条“没超”的日志太吵，压缩到每小时一条
+                if ((DateTime.Now - _lastLimitIdleLog).TotalHours >= 1)
+                {
+                    _lastLimitIdleLog = DateTime.Now;
+                    sink(string.Format("{0} 缓存 {1}，未超过上限 {2}", tag, FormatSize(total), FormatSize(limit)));
+                }
                 return result;
             }
+
+            LastLimitCollectedFiles = true;
+            List<CacheFile> files = CollectCacheFiles(cfg, wx, sink);
+            total = 0;
+            foreach (CacheFile f in files) total += f.Length;
 
             sink(string.Format("{0} 缓存 {1} 超过上限 {2}，开始{3}", tag,
                 FormatSize(total), FormatSize(limit), deleteAll ? "全部删除" : "删除旧文件"));
@@ -1924,18 +2088,6 @@ namespace QQCacheTray
             return result;
         }
 
-        public static long MeasureWx(Config cfg)
-        {
-            long total = 0;
-            foreach (KeyValuePair<string, string> kv in GetWxCategoryDirs(cfg, delegate { }))
-            {
-                string cat = kv.Key.Split('|')[1];
-                if (!WxCatEnabled(cfg, cat)) continue;
-                total += Measure(kv.Value);
-            }
-            return total;
-        }
-
         // 倒计时文案：直接给到期时刻
         public static string CountdownText(bool enabled, bool auto, DateTime due)
         {
@@ -2005,33 +2157,6 @@ namespace QQCacheTray
             if (tail.Length > 30) tail = "…" + tail.Substring(tail.Length - 30);
 
             return string.Format("自动检测：{0} 个目录 · {1}", paths.Count, tail);
-        }
-
-        public static long MeasureTotal(Config cfg)
-        {
-            long total = 0;
-            foreach (string ntData in GetNtDataDirs(cfg, delegate { }))
-            {
-                foreach (string cat in cfg.Categories())
-                {
-                    string p = Path.Combine(ntData, cat);
-                    if (Directory.Exists(p)) total += Measure(p);
-                }
-            }
-            return total;
-        }
-
-        private static long Measure(string dir)
-        {
-            long sum = 0;
-            List<FileInfo> files = new List<FileInfo>();
-            Walk(dir, files, delegate { }, 0);
-            foreach (FileInfo fi in files)
-            {
-                try { sum += fi.Length; }
-                catch { }
-            }
-            return sum;
         }
 
         private static void Walk(string dir, List<FileInfo> acc, Action<string> log, int depth)
@@ -2130,6 +2255,7 @@ namespace QQCacheTray
         private bool _busy;
         private bool _settingsOpen;
         private int _limitTick;
+        private int _limitEveryMinutes = 10;   // 由上次占用比例自适应调整
         private UpdateChecker.Info _pendingUpdate;
         private bool _promptOpen;
 
@@ -2189,6 +2315,9 @@ namespace QQCacheTray
             _menu.Items.Add(new ToolStripSeparator());
             _menu.Items.Add(miExit);
 
+            // 托盘菜单里的“QQ 缓存：x”只在菜单要弹出时才算一次，不在每次开机时全量扫缓存
+            _menu.Opening += delegate { EnsureStatus(false); };
+
             // 开机自启时可能比资源管理器还早，托盘还没建好就注册会失败，
             // 所以先等 Shell_TrayWnd 出现（正常启动时是一次即返回）
             WaitForShell(20);
@@ -2207,7 +2336,13 @@ namespace QQCacheTray
             // 放后台做，避免删旧任务时拖住启动
             ThreadPool.QueueUserWorkItem(delegate
             {
-                AutoStart.Normalize();
+                // 旧版留下的计划任务/启动项只需要清一次，之后每次开机都不用再拉 schtasks
+                if (!_cfg.LegacyCleaned)
+                {
+                    AutoStart.Normalize();
+                    _cfg.LegacyCleaned = true;
+                    try { _cfg.Save(); } catch { }
+                }
 
                 // 配置里开着自启就重写一遍启动脚本，保证里面记的 exe 路径是最新的
                 if (_cfg.AutostartEnabled)
@@ -2216,6 +2351,14 @@ namespace QQCacheTray
                     if (!AutoStart.Set(true, out msg)) Logger.Log("开机自启脚本写入失败：" + msg);
                 }
             });
+
+            // 后台常驻程序不跟前台抢 CPU（空闲时照样满速，只在竞争时让路）
+            try
+            {
+                Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.BelowNormal;
+                Logger.Log("进程优先级：BelowNormal");
+            }
+            catch (Exception ex) { Logger.Log("设置进程优先级失败：" + ex.Message); }
 
             // 首次运行不立刻删，从今天开始计时，避免一装上就猛清一次
             bool firstRun = _cfg.LastRun == DateTime.MinValue;
@@ -2348,6 +2491,42 @@ namespace QQCacheTray
             _timer2Start(seconds);
         }
 
+        // 下一次“该干活”是多少秒后：上限模式要 60 秒粒度（10 分钟检查一次），
+        // 没有定时任务就 5 分钟醒一次，有定时任务则贴着到期时间走（夹在 60~300 秒之间）
+        internal static int NextTickSeconds(Config cfg, DateTime now)
+        {
+            if (cfg == null) return 300;
+
+            bool limitActive = (cfg.Enabled && cfg.LimitEnabled) || (cfg.WxEnabled && cfg.WxLimitEnabled);
+            if (limitActive) return 60;
+
+            if (!cfg.AutoCleanEnabled && !cfg.WxAutoCleanEnabled) return 300;
+
+            double best = double.MaxValue;
+            if (cfg.AutoCleanEnabled) best = Math.Min(best, (Cleaner.DueAt(cfg) - now).TotalSeconds);
+            if (cfg.WxAutoCleanEnabled) best = Math.Min(best, (Cleaner.WxDueAt(cfg) - now).TotalSeconds);
+
+            if (best <= 0) return 60;
+            int s = (int)Math.Ceiling(best);
+            if (s < 60) return 60;
+            if (s > 300) return 300;
+            return s;
+        }
+
+        private static double LimitRatio()
+        {
+            if (Cleaner.LastLimitLimit <= 0) return 0;
+            return Cleaner.LastLimitTotal / (double)Cleaner.LastLimitLimit;
+        }
+
+        // 离上限越远，查得越少：不到一半上限半小时一次，不到八成十分钟，逼近上限五分钟
+        internal static int NextLimitMinutes(double ratio)
+        {
+            if (ratio >= 0.8) return 5;
+            if (ratio >= 0.5) return 10;
+            return 30;
+        }
+
         private void _timer2Stop()
         {
             if (_timer != null) _timer.Stop();
@@ -2372,23 +2551,26 @@ namespace QQCacheTray
                 RunClean(true);
             }
 
-            // 每 10 分钟检查一次容量上限
+            // 容量上限：按“离上限还有多远”自适应间隔（离得远就少扫几趟），默认 10 分钟
             _limitTick++;
-            if (_limitTick >= 10)
+            if (_limitTick >= _limitEveryMinutes)
             {
                 _limitTick = 0;
+                double worst = 0;
                 try
                 {
                     string limitMsg = "";
                     if (_cfg.Enabled && _cfg.LimitEnabled)
                     {
                         CleanResult lq = Cleaner.EnforceLimit(_cfg, false, Logger.Log);
+                        worst = Math.Max(worst, LimitRatio());
                         if (lq != null && lq.TotalDeleted > 0)
                             limitMsg += string.Format("QQ：已清理 {0} 个文件，释放 {1}\n", lq.TotalDeleted, Cleaner.FormatSize(lq.TotalFreed));
                     }
                     if (_cfg.WxEnabled && _cfg.WxLimitEnabled)
                     {
                         CleanResult lw = Cleaner.EnforceLimit(_cfg, true, Logger.Log);
+                        worst = Math.Max(worst, LimitRatio());
                         if (lw != null && lw.TotalDeleted > 0)
                             limitMsg += string.Format("微信：已清理 {0} 个文件，释放 {1}\n", lw.TotalDeleted, Cleaner.FormatSize(lw.TotalFreed));
                     }
@@ -2400,6 +2582,8 @@ namespace QQCacheTray
                     }
                 }
                 catch (Exception ex) { Logger.Log("容量上限检查失败：" + ex.Message); }
+
+                if (worst > 0) _limitEveryMinutes = NextLimitMinutes(worst);
             }
 
             // 常驻时每 12 小时查一次更新（长时间不重启也能收到通知）
@@ -2408,7 +2592,8 @@ namespace QQCacheTray
                 CheckForUpdates(false);
             }
 
-            _timer.Interval = 60 * 1000;   // 每分钟看一次，到点就清
+            // 没事干的时候别每分钟醒一次：上限模式保 60 秒粒度，其余按“下次到期”算，最长 5 分钟
+            _timer.Interval = Math.Max(5, NextTickSeconds(_cfg, DateTime.Now)) * 1000;
             _timer.Start();
         }
 
@@ -2670,13 +2855,29 @@ namespace QQCacheTray
             });
         }
 
+        private bool _statusDirty = true;
+        private DateTime _statusAt = DateTime.MinValue;
+
+        // 只更新“下次清理”这类廉价文字；缓存大小推迟到托盘菜单弹出时再算（见 EnsureStatus）
         private void RefreshStatus()
         {
             _miNext.Text = "下次清理：" + NextRunText();
+            _statusDirty = true;
+        }
 
+        private void EnsureStatus(bool force)
+        {
+            if (!force && !_statusDirty && (DateTime.Now - _statusAt).TotalMinutes < 5) return;
+
+            _statusDirty = false;
+            _statusAt = DateTime.Now;
+            _miStatus.Text = "QQ 缓存：统计中…";
+
+            Config snap = _cfg;   // 后台只读快照，别和设置窗口的保存抢同一个对象
             ThreadPool.QueueUserWorkItem(delegate
             {
-                long size = Cleaner.MeasureTotal(_cfg);
+                long size = 0;
+                try { size = Cleaner.MeasureCache(snap, false, null); } catch { }
                 PostToUi(delegate
                 {
                     _miStatus.Text = "QQ 缓存：" + Cleaner.FormatSize(size) + "（点击设置）";
@@ -2798,6 +2999,7 @@ namespace QQCacheTray
         public string SubText = "";
         public Color Accent = Color.FromArgb(139, 92, 246);
         public bool Dark;
+        public bool Busy;   // 统计中：还没有结果时圆心画“统计中…”，不要画 0 B
 
         private static readonly Color TrackColor = Color.FromArgb(236, 238, 244);
         private static readonly Color OtherColor = Color.FromArgb(196, 181, 253);
@@ -2907,7 +3109,9 @@ namespace QQCacheTray
                 sf.LineAlignment = StringAlignment.Center;
 
                 RectangleF r1 = new RectangleF(inner.X, inner.Y - 12, inner.Width, inner.Height);
-                using (Brush tb = new SolidBrush(textC)) g.DrawString(CenterText ?? "", _big, tb, r1, sf);
+                string center = CenterText;
+                if (Busy && string.IsNullOrEmpty(center)) center = "统计中…";
+                using (Brush tb = new SolidBrush(textC)) g.DrawString(center ?? "", _big, tb, r1, sf);
 
                 RectangleF r2 = new RectangleF(inner.X, inner.Y + 26, inner.Width, inner.Height);
                 using (Brush sb = new SolidBrush(subC)) g.DrawString(SubText ?? "", _small, sb, r2, sf);
@@ -3152,6 +3356,7 @@ namespace QQCacheTray
             _chkDark.Checked = cfg.DarkMode || Program.ForceDark;
             ApplyTheme(_chkDark.Checked);
             DetectLegacyTask();
+            _loaded = true;   // 配置已经装进各个控件，从这里开始才允许统计
         }
 
         // WS_EX_COMPOSITED：让整个窗口（含所有子控件）离屏合成后再一次性显示，
@@ -3220,11 +3425,11 @@ namespace QQCacheTray
 
             // 自绘的标签切换栏（不用 TabControl，避免系统绘制的浅色边框）
             _tabWx = MakeSeg("微信", 12, 8, 100);
-            _tabWx.Click += delegate { SelectTab(0); };
+            _tabWx.Click += delegate { SelectTab(0); EnsureMeasured(_wx); };   // 第一次切到这个标签时补算大小
             Controls.Add(_tabWx);
 
             _tabQq = MakeSeg("QQ", 118, 8, 100);
-            _tabQq.Click += delegate { SelectTab(1); };
+            _tabQq.Click += delegate { SelectTab(1); EnsureMeasured(_qq); };
             Controls.Add(_tabQq);
 
             _tabHost = new Panel();
@@ -3289,6 +3494,9 @@ namespace QQCacheTray
             SelectTab(Program.SettingsTab);
         }
 
+        // 只负责切换显示与配色，不在这里统计。
+        // 构造期（LoadPanel 之前）统计会读到还没加载的复选框 -> Categories() 为空 -> 算出 0 B；
+        // 主题切换也不该顺手发起一次统计。统计由标签点击、OnShown 显式调用 EnsureMeasured 决定。
         private void SelectTab(int idx)
         {
             _tabIndex = idx;
@@ -3299,8 +3507,6 @@ namespace QQCacheTray
 
             StyleTab(_tabWx, idx == 0);
             StyleTab(_tabQq, idx == 1);
-
-            EnsureMeasured(idx == 0 ? _wx : _qq);   // 第一次切到这个标签时补算大小
         }
 
         private void StyleTab(Button b, bool active)
@@ -3708,6 +3914,8 @@ namespace QQCacheTray
         // ---- 缓存统计：后台线程跑，避免大缓存时设置窗口卡住 ----
         private readonly Dictionary<AppPanel, int> _refreshGen = new Dictionary<AppPanel, int>();
         private bool _wxMeasured, _qqMeasured;
+        private bool _loaded;      // LoadPanel 是否已经跑过：之前统计读到的是空配置，会算出 0 B
+        private int _scanCount;    // 发起过的统计次数，自检用来确认“切主题不会重新统计”
 
         private void MarkDirtyAll()
         {
@@ -3724,6 +3932,7 @@ namespace QQCacheTray
         private void RefreshSize(AppPanel p)
         {
             if (p == null) return;
+            if (!_loaded) return;   // LoadPanel 之前不统计：那时复选框还是默认值，算出来是 0
 
             Config tmp = new Config();
             SavePanel(p, tmp);
@@ -3734,7 +3943,9 @@ namespace QQCacheTray
             if (!_refreshGen.TryGetValue(p, out gen)) gen = 0;
             gen++;
             _refreshGen[p] = gen;
+            _scanCount++;
 
+            p.Ring.Busy = true;   // 环形图：没有旧数值时显示“统计中…”，有旧数值就继续显示，别闪 0 B
             p.Size.Text = "当前占用：统计中…";
             p.Rescan.Enabled = false;
 
@@ -3774,6 +3985,8 @@ namespace QQCacheTray
         private void ApplySize(AppPanel p, long cache, string root, long total, long free)
         {
             if (total <= 0) total = 1;
+
+            p.Ring.Busy = false;
 
             p.Ring.TotalBytes = total;
             p.Ring.AppBytes = cache;
@@ -4181,6 +4394,15 @@ namespace QQCacheTray
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
+
+        // ---- 自检用：驱动真实控件、读回界面上真正的文字（不参与产品逻辑）----
+        internal string RingTextForTest(bool wx) { return (wx ? _wx : _qq).Ring.CenterText; }
+        internal string SizeTextForTest(bool wx) { return (wx ? _wx : _qq).Size.Text; }
+        internal string DetectTextForTest(bool wx) { return (wx ? _wx : _qq).Detect.Text; }
+        internal void ToggleDarkForTest() { _chkDark.Checked = !_chkDark.Checked; }   // 走真实路径：勾选框 -> ApplyTheme
+        internal int ScanCountForTest { get { return _scanCount; } }
+        // 显式统计某一页：自检不依赖当前停在哪个标签页
+        internal void MeasureForTest(bool wx) { if (_loaded) EnsureMeasured(wx ? _wx : _qq); }
     }
 
     internal static class Guard
@@ -4392,7 +4614,22 @@ namespace QQCacheTray
                         return false;
                     }
 
-                    File.WriteAllText(StartupCmdPath, BuildStartupCmd(), Encoding.Default);
+                    // 内容没变就不重写：每次开机都写一遍启动脚本没有意义
+                    byte[] want = Encoding.Default.GetBytes(BuildStartupCmd());
+                    byte[] have = null;
+                    try { if (File.Exists(StartupCmdPath)) have = File.ReadAllBytes(StartupCmdPath); } catch { }
+                    if (have != null && have.Length == want.Length)
+                    {
+                        bool same = true;
+                        for (int i = 0; i < want.Length; i++) { if (have[i] != want[i]) { same = false; break; } }
+                        if (same)
+                        {
+                            Logger.Log("开机启动脚本已是最新，跳过写入");
+                            return true;
+                        }
+                    }
+
+                    File.WriteAllBytes(StartupCmdPath, want);
                     Logger.Log("已写入开机启动脚本：" + StartupCmdPath);
                     return true;
                 }
