@@ -1,8 +1,9 @@
 ﻿param(
     [Parameter(Mandatory = $true)][string]$User,
     [string]$Repo = 'CacheCleaner',
-    [string]$Tag = 'v1.3.5',
-    [switch]$NoPush
+    [Parameter(Mandatory = $true)][string]$Tag,
+    [switch]$NoPush,
+    [switch]$Force
 )
 
 # 用 Continue：git 往 stderr 写进度时不会被 PowerShell 当成终止错误
@@ -41,6 +42,30 @@ function Run-Git([string[]]$gitArgs) {
     if ($LASTEXITCODE -ne 0) { throw "git $($gitArgs -join ' ') 失败（$LASTEXITCODE）" }
 }
 
+Write-Host "== 0) 发版前护栏 ==" -ForegroundColor Cyan
+$verFromTag = $Tag -replace '^v', ''
+$srcPath = Join-Path $root 'src\QQCacheTray.cs'
+$asmVer = ''
+if (Test-Path $srcPath) {
+    $srcText = Get-Content $srcPath -Raw -Encoding UTF8
+    if ($srcText -match 'AssemblyVersion\("([\d\.]+)"\)') { $asmVer = $Matches[1] }
+}
+if (-not $asmVer) {
+    Write-Host "  读不到 src\QQCacheTray.cs 的 AssemblyVersion，中止。" -ForegroundColor Red
+    exit 1
+}
+if ($asmVer -ne ($verFromTag + '.0')) {
+    Write-Host ("  tag " + $Tag + " 与源码版本 " + $asmVer + " 不一致（应为 " + $verFromTag + ".0），中止。") -ForegroundColor Red
+    exit 1
+}
+Write-Host ("  tag=" + $Tag + " 源码版本=" + $asmVer)
+
+& $git fetch origin --tags *> $null
+$remoteTag = & $git ls-remote --tags origin ("refs/tags/" + $Tag) 2>$null
+if ($remoteTag -and -not $Force) {
+    Write-Host ("  远端已存在 tag " + $Tag + "：已发布的 tag 不应移动，中止。确认要覆盖请显式加 -Force。") -ForegroundColor Red
+    exit 1
+}
 Write-Host "== 1) 写入仓库地址 ==" -ForegroundColor Cyan
 $src = Join-Path $root 'src\QQCacheTray.cs'
 $text = Get-Content $src -Raw -Encoding UTF8
